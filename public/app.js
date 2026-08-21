@@ -37,7 +37,15 @@ let notesMeta = [];
 let currentNotebookId = null;
 let note = null;                 // full note currently open
 let inkMode = false;
-let tool = 'pen', color = '#1D3A6E', size = 3, palmReject = true;
+let tool = 'pen', color = '#1D3A6E', size = 3;
+// Palm rejection ignores finger touches so a resting hand doesn't draw while
+// you write with a stylus. On a device that HAS no stylus — an Android phone,
+// say — every contact is pointerType 'touch', so rejecting them all leaves
+// nothing that can draw at all. So it starts off, and switches itself on the
+// first time this device reports a real pen.
+let penSeen = false;
+try { penSeen = localStorage.getItem('inkwell.penSeen') === '1'; } catch {}
+let palmReject = penSeen;
 let undoStack = [], redoStack = [];
 let liveRemote = new Map();      // strokeId -> in-progress stroke from other device
 let lastLocalInput = 0;          // guards against remote text clobbering typing
@@ -138,6 +146,7 @@ socket.on('ink:end', (m) => {
 });
 socket.on('ink:remove', (m) => {
   if (!note || m.noteId !== note.id) return;
+  for (const id of m.strokeIds) liveRemote.delete(id); // mid-stroke ones too
   note.strokes = note.strokes.filter(s => !m.strokeIds.includes(s.id));
   markInk(note.id, note.strokes.length > 0);
   redraw();
@@ -1221,10 +1230,23 @@ document.addEventListener('pointerdown', (e) => {
   if (!penPop.hidden && !e.target.closest('#pen-pop') && !e.target.closest('.pen-item')) closePenPop();
 });
 
-$('#palm').onclick = () => {
-  palmReject = !palmReject;
+function reflectPalm() {
   $('#palm').classList.toggle('on', palmReject);
-};
+  $('#palm').title = palmReject
+    ? 'Palm rejection is on: only a pen draws, a finger scrolls the page'
+    : 'Palm rejection is off: a finger draws, two fingers scroll the page';
+}
+$('#palm').onclick = () => { palmReject = !palmReject; reflectPalm(); };
+
+// the moment a real stylus shows up, palm rejection starts earning its keep
+window.addEventListener('pointerdown', (e) => {
+  if (e.pointerType !== 'pen' || penSeen) return;
+  penSeen = true;
+  try { localStorage.setItem('inkwell.penSeen', '1'); } catch {}
+  palmReject = true;
+  reflectPalm();
+}, true);
+reflectPalm();
 
 // pick up the default pen
 applyPen(pens.find(p => p.id === activePenId) || pens[0]);
@@ -1402,7 +1424,10 @@ function toLogical(e) {
   return {
     x: (e.clientX - r.left) * k,
     y: (e.clientY - r.top) * k,
-    p: e.pressure && e.pressure > 0 ? e.pressure : 0.5
+    // a finger has no pressure to give — Android reports a flat 1.0, which
+    // would ink every touch stroke at full marker width
+    p: e.pointerType === 'touch' ? 0.5
+       : (e.pressure > 0 ? e.pressure : 0.5)
   };
 }
 
@@ -1528,16 +1553,37 @@ function flushPoints() {
   pendingPoints = [];
 }
 
-// In ink mode a palm-rejected finger shouldn't be dead — it pans the page,
-// like OneNote: finger scrolls, pen draws.
+// In ink mode a finger never just sits there — it either draws or scrolls:
+//   palm rejection on  — like OneNote on a tablet: pen draws, one finger scrolls.
+//   palm rejection off — like any phone note app: one finger draws, TWO fingers
+//                        scroll (a second finger means "I meant to scroll", so
+//                        the mark the first one started is thrown away).
 let touchPan = null;
+const touchPts = new Set();
+
+// throw away the stroke in progress, on this device and on the others
+function abortStroke() {
+  if (!activeStroke) return;
+  const id = activeStroke.id;
+  activeStroke = null;
+  pendingPoints = [];
+  if (pointsTimer) { clearTimeout(pointsTimer); pointsTimer = null; }
+  socket.emit('ink:remove', { noteId: note.id, strokeIds: [id] });
+  redraw();
+}
+
 canvas.addEventListener('pointerdown', (e) => {
   if (!inkMode || !note) return;
-  if (palmReject && e.pointerType === 'touch') {
-    touchPan = { id: e.pointerId, y: e.clientY, top: paperScroll.scrollTop };
-    try { canvas.setPointerCapture(e.pointerId); } catch {}
-    e.preventDefault();
-    return;
+  if (e.pointerType === 'touch') {
+    touchPts.add(e.pointerId);
+    // a rejected palm, or the second finger of a scroll gesture
+    if (palmReject || touchPts.size > 1) {
+      if (touchPts.size > 1) abortStroke();
+      touchPan = { id: e.pointerId, y: e.clientY, top: paperScroll.scrollTop };
+      try { canvas.setPointerCapture(e.pointerId); } catch {}
+      e.preventDefault();
+      return;
+    }
   }
   e.preventDefault();
   try { canvas.setPointerCapture(e.pointerId); } catch {}
@@ -1557,9 +1603,10 @@ canvas.addEventListener('pointerdown', (e) => {
 
 canvas.addEventListener('pointermove', (e) => {
   if (!inkMode || !note) return;
-  if (touchPan && e.pointerId === touchPan.id) {
-    paperScroll.scrollTop = touchPan.top - (e.clientY - touchPan.y);
-    return;
+  if (touchPan) {
+    if (e.pointerId === touchPan.id)
+      paperScroll.scrollTop = touchPan.top - (e.clientY - touchPan.y);
+    return; // a scroll gesture owns the canvas until every finger is up
   }
   if (palmReject && e.pointerType === 'touch') return;
   if (tool === 'eraser') {
@@ -1567,7 +1614,10 @@ canvas.addEventListener('pointermove', (e) => {
     return;
   }
   if (!activeStroke) return;
-  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  // coalesced events give back every sample the digitiser took between frames;
+  // an empty list means there's nothing extra, not that the move didn't happen
+  let events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+  if (!events.length) events = [e];
   for (const ce of events) addSmoothed(toLogical(ce));
   pressureOut.textContent = 'pressure ' + (e.pressure || 0.5).toFixed(2);
   if (!pointsTimer) pointsTimer = setTimeout(flushPoints, 40); // ~25 fps to the other device
@@ -1579,7 +1629,11 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 function endStroke(e) {
-  if (touchPan && e && e.pointerId === touchPan.id) { touchPan = null; return; }
+  if (e && e.pointerType === 'touch') touchPts.delete(e.pointerId);
+  if (touchPan) {
+    if (!touchPts.size) touchPan = null; // gesture ends when the last finger lifts
+    return;
+  }
   if (tool === 'eraser') { finishErase(); return; }
   if (!activeStroke) return;
   flushPoints();
@@ -1596,6 +1650,8 @@ function endStroke(e) {
 }
 canvas.addEventListener('pointerup', endStroke);
 canvas.addEventListener('pointercancel', endStroke);
+// Android pops a selection/callout menu on a slow press, which cancels the pen
+canvas.addEventListener('contextmenu', (e) => { if (inkMode) e.preventDefault(); });
 
 // eraser: remove whole strokes near the pointer, keeping copies for undo
 let removedStrokesCache = [];

@@ -155,7 +155,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 #ink-canvas{position:absolute; inset:0; width:100%; pointer-events:none; z-index:5}
 .paper.inking #ink-canvas{pointer-events:auto; cursor:crosshair; touch-action:none}
-.paper.inking .rendered{user-select:none}
+/* on a phone a slow press would otherwise pop the selection/callout menu and
+   cancel the stroke halfway through a letter */
+.paper.inking{-webkit-touch-callout:none}
+.paper.inking .rendered{-webkit-user-select:none; user-select:none}
 
 /* ───────── Draw ribbon (OneNote scheme): docked under the toolbar ───────── */
 .work{position:relative}
