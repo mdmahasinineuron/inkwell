@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: inkwell
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: INKWELL_USER
+        value: mahasin
+      - key: INKWELL_PASS
+        sync: false   # you type this in the Render dashboard; it never lands in git
+      - key: MONGODB_URI
+        sync: false   # your MongoDB Atlas connection string (free tier) — keeps
+                      # notes safe across restarts and redeploys

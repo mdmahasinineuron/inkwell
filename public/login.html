@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — Inkwell</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --desk:#23272E; --desk-2:#1C2026; --paper:#F4EFE4; --line:#3A404A;
+    --ink:#1D3A6E; --ink-bright:#5B8DEF; --text:#D8DCE3; --dim:#8B93A1;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; display:grid; place-items:center;
+    background:
+      radial-gradient(1100px 500px at 70% -10%, #2B313B 0%, transparent 60%),
+      var(--desk);
+    font-family:'IBM Plex Sans',system-ui,sans-serif; color:var(--text);
+  }
+  .card{
+    width:min(380px, 92vw); background:var(--desk-2);
+    border:1px solid var(--line); border-radius:10px; padding:34px 32px 30px;
+    box-shadow:0 24px 60px rgba(0,0,0,.45);
+  }
+  .nib{
+    width:44px;height:44px;border-radius:10px;display:grid;place-items:center;
+    background:linear-gradient(150deg,var(--ink) 0%, #12264A 100%);
+    color:var(--paper); font-family:'IBM Plex Mono',monospace; font-size:22px;
+    margin-bottom:18px; border:1px solid #2E4A85;
+  }
+  h1{font-size:20px; font-weight:600; margin:0 0 4px}
+  p.sub{margin:0 0 24px; color:var(--dim); font-size:13.5px}
+  label{display:block; font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); margin:14px 0 6px; font-family:'IBM Plex Mono',monospace}
+  input{
+    width:100%; padding:11px 12px; border-radius:7px; font-size:15px;
+    background:var(--desk); color:var(--text); border:1px solid var(--line);
+    font-family:inherit; outline:none; transition:border-color .15s;
+  }
+  input:focus{border-color:var(--ink-bright)}
+  button{
+    width:100%; margin-top:22px; padding:12px; border:0; border-radius:7px;
+    background:var(--ink-bright); color:#0D1526; font-weight:600; font-size:15px;
+    cursor:pointer; font-family:inherit; transition:filter .15s;
+  }
+  button:hover{filter:brightness(1.08)}
+  button:focus-visible,input:focus-visible{outline:2px solid var(--ink-bright); outline-offset:2px}
+  .err{
+    display:none; margin-top:14px; padding:10px 12px; border-radius:7px;
+    background:#3A2226; border:1px solid #6E3038; color:#F0B7BD; font-size:13.5px;
+  }
+  .err.show{display:block}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="nib">✒</div>
+    <h1>Inkwell</h1>
+    <p class="sub">Sign in to open your notebooks.</p>
+    <div>
+      <label for="u">Username</label>
+      <input id="u" autocomplete="username" autocapitalize="off" spellcheck="false">
+      <label for="p">Password</label>
+      <input id="p" type="password" autocomplete="current-password">
+      <button id="go">Sign in</button>
+      <div class="err" id="err"></div>
+    </div>
+  </div>
+<script>
+  const u = document.getElementById('u'), p = document.getElementById('p'),
+        err = document.getElementById('err');
+  async function login(){
+    err.classList.remove('show');
+    const res = await fetch('/login', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ username: u.value.trim(), password: p.value })
+    });
+    if (res.ok) { location.href = '/'; return; }
+    const data = await res.json().catch(() => ({}));
+    err.textContent = data.error || 'Sign-in failed.';
+    err.classList.add('show');
+    p.select();
+  }
+  document.getElementById('go').addEventListener('click', login);
+  [u,p].forEach(el => el.addEventListener('keydown', e => { if (e.key === 'Enter') login(); }));
+  u.focus();
+</script>
+</body>
+</html>
