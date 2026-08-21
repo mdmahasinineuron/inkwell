@@ -92,18 +92,23 @@
 
       <div class="rz" id="rz-panes" title="Drag to resize"></div>
       <div class="paper-scroll" id="paper-scroll">
-        <div class="paper" id="paper">
-          <div class="rendered" id="rendered"></div>
-          <canvas id="ink-canvas"></canvas>
-          <!-- floating format bar for inline editing on the paper -->
-          <div class="text-toolbar" id="text-toolbar" hidden>
-            <button id="tt-bold" title="Bold (Ctrl+B)"><b>B</b></button>
-            <button id="tt-italic" title="Italic (Ctrl+I)"><i>I</i></button>
-            <span class="tt-sep"></span>
-            <button id="tt-smaller" title="Smaller text">A−</button>
-            <button id="tt-bigger" title="Larger text">A+</button>
-            <span class="tt-sep"></span>
-            <button id="tt-done" title="Done (Esc)">✓</button>
+        <!-- .paper-fit is the layout box; .paper inside it keeps its true page
+             size (820 logical px) and is scaled to fit, so the page looks and
+             measures the same on every device. -->
+        <div class="paper-fit" id="paper-fit">
+          <div class="paper" id="paper">
+            <div class="rendered" id="rendered"></div>
+            <canvas id="ink-canvas"></canvas>
+            <!-- floating format bar for inline editing on the paper -->
+            <div class="text-toolbar" id="text-toolbar" hidden>
+              <button id="tt-bold" title="Bold (Ctrl+B)"><b>B</b></button>
+              <button id="tt-italic" title="Italic (Ctrl+I)"><i>I</i></button>
+              <span class="tt-sep"></span>
+              <button id="tt-smaller" title="Smaller text">A−</button>
+              <button id="tt-bigger" title="Larger text">A+</button>
+              <span class="tt-sep"></span>
+              <button id="tt-done" title="Done (Esc)">✓</button>
+            </div>
           </div>
         </div>
       </div>

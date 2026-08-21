@@ -26,7 +26,7 @@ const LANGUAGES = [
 const $ = (s) => document.querySelector(s);
 const notebookList = $('#notebook-list'), noteList = $('#note-list');
 const titleEl = $('#title'), editor = $('#editor'), rendered = $('#rendered');
-const paper = $('#paper'), paperScroll = $('#paper-scroll');
+const paper = $('#paper'), paperFit = $('#paper-fit'), paperScroll = $('#paper-scroll');
 const canvas = $('#ink-canvas'), ctx = canvas.getContext('2d');
 const penTray = $('#pen-tray'), pressureOut = $('#pressure-readout');
 const presenceEl = $('#presence');
@@ -269,15 +269,16 @@ rendered.addEventListener('pointerdown', (e) => {
   const tile = head.closest('.code-tile');
   const st = tileState(tile.dataset.ci);
   const tr = tile.getBoundingClientRect(), pr = paper.getBoundingClientRect();
+  const z = paperZoom || 1; // rects are screen px; tile offsets are page px
   drag = {
-    tile, st,
+    tile, st, z,
     startX: e.clientX, startY: e.clientY,
     baseX: st.x || 0, baseY: st.y || 0,
-    // natural (untransformed) bounds, for clamping inside the paper
-    natL: tr.left - (st.x || 0) - pr.left,
-    natT: tr.top - (st.y || 0) - pr.top,
-    w: tr.width, h: tr.height,
-    paperW: pr.width, paperH: paper.scrollHeight
+    // natural (untranslated) bounds in page px, for clamping inside the paper
+    natL: (tr.left - pr.left) / z - (st.x || 0),
+    natT: (tr.top - pr.top) / z - (st.y || 0),
+    w: tr.width / z, h: tr.height / z,
+    paperW: pr.width / z, paperH: paper.scrollHeight
   };
   tile.classList.add('dragging');
   head.setPointerCapture(e.pointerId);
@@ -285,8 +286,8 @@ rendered.addEventListener('pointerdown', (e) => {
 });
 rendered.addEventListener('pointermove', (e) => {
   if (!drag) return;
-  let nx = drag.baseX + (e.clientX - drag.startX);
-  let ny = drag.baseY + (e.clientY - drag.startY);
+  let nx = drag.baseX + (e.clientX - drag.startX) / drag.z;
+  let ny = drag.baseY + (e.clientY - drag.startY) / drag.z;
   nx = Math.min(Math.max(nx, -drag.natL), drag.paperW - drag.natL - drag.w);
   ny = Math.min(Math.max(ny, -drag.natT), drag.paperH - drag.natT - drag.h);
   drag.nx = nx; drag.ny = ny;
@@ -320,7 +321,8 @@ rendered.addEventListener('pointerdown', (e) => {
   const body = e.target.closest('.code-tile-body');
   if (!body) return;
   const r = body.getBoundingClientRect();
-  if (e.clientX > r.right - 20 && e.clientY > r.bottom - 20) resizingBody = body;
+  const grip = 20 * (paperZoom || 1); // the 20px corner, in screen px
+  if (e.clientX > r.right - grip && e.clientY > r.bottom - grip) resizingBody = body;
 });
 window.addEventListener('pointerup', () => {
   if (!resizingBody || !note) { resizingBody = null; return; }
@@ -482,8 +484,12 @@ function placeCaretAt(x, y) {
 function positionTextToolbar() {
   const s = peSession;
   if (!s) return;
-  ttEl.style.top = Math.max(6, s.el.offsetTop - 46) + 'px';
-  ttEl.style.left = Math.min(Math.max(8, s.el.offsetLeft), Math.max(8, paper.clientWidth - 235)) + 'px';
+  // the bar is counter-scaled so it stays readable, so its footprint on the
+  // page grows as the page shrinks — budget for that when placing it
+  const iz = 1 / (paperZoom || 1);
+  ttEl.style.top = Math.max(6, s.el.offsetTop - 46 * iz) + 'px';
+  ttEl.style.left = Math.min(Math.max(8, s.el.offsetLeft),
+                             Math.max(8, paper.clientWidth - 235 * iz)) + 'px';
 }
 
 function beginPeSession(el, ev) {
@@ -554,7 +560,7 @@ paper.addEventListener('click', (e) => {
   if (peSession) return; // clicking away just commits (handled by pointerdown below)
 
   // empty area: insert a new paragraph where you clicked
-  const y = e.clientY - paper.getBoundingClientRect().top;
+  const y = (e.clientY - paper.getBoundingClientRect().top) / paperZoom; // -> page px
   const kids = [...rendered.children];
   // a click level with an existing block (its margin) edits that block
   const hit = kids.find(k => PE_EDITABLE.test(k.tagName) &&
@@ -1223,13 +1229,19 @@ $('#palm').onclick = () => {
 // pick up the default pen
 applyPen(pens.find(p => p.id === activePenId) || pens[0]);
 
-// canvas sizing — logical space is PAPER_W wide, scaled to the on-screen paper.
+// canvas sizing.
+// The page is ALWAYS PAPER_W wide in its own coordinates — on a phone we shrink
+// the whole page with a CSS transform instead of letting it reflow narrower.
+// That keeps ONE coordinate system across devices: text, code tiles, page
+// breaks and ink strokes all land on the same spot no matter the display size.
+// paperZoom is only the screen scale (screen px per page px), never part of a
+// stored coordinate.
 // Per-note page style (note.pageMode):
 //   'a4'       — Word-style stack of A4 pages: height snaps to whole pages,
 //                a new page is added automatically as text or ink nears the
 //                end, and every boundary offers "insert blank page".
 //   'infinite' — one endless sheet that grows with the content.
-let scaleFactor = 1, dpr = 1;
+let paperZoom = 1, dpr = 1;
 const A4_RATIO = 297 / 210;
 const PAGE_H_LOGICAL = Math.round(PAPER_W * A4_RATIO); // 1160 in stroke space
 
@@ -1238,7 +1250,7 @@ function maxInkY() {
   if (note && Array.isArray(note.strokes))
     for (const s of note.strokes)
       for (const p of s.points) if (p.y > m) m = p.y;
-  return m * scaleFactor; // css px
+  return m; // page px — same units as the rest of the page
 }
 
 function updatePageMarks(pages, pageH) {
@@ -1268,11 +1280,13 @@ function updatePageMarks(pages, pageH) {
 }
 
 function fitCanvas() {
-  const w = paper.clientWidth;
-  if (!w) return;
+  const avail = paperFit.clientWidth;
+  if (!avail) return;
   dpr = window.devicePixelRatio || 1;
-  scaleFactor = w / PAPER_W;
-  const pageH = Math.round(w * A4_RATIO);
+  paperZoom = Math.min(1, avail / PAPER_W); // shrink to fit; never blow up past 1:1
+  paper.style.setProperty('--zoom', paperZoom);
+  paper.style.setProperty('--inv-zoom', 1 / paperZoom);
+  const pageH = PAGE_H_LOGICAL; // a page is a page — identical on every device
   paper.style.setProperty('--page-h', pageH + 'px');
   const contentH = Math.max(rendered.scrollHeight + 48, maxInkY() + 80);
   let h;
@@ -1288,12 +1302,16 @@ function fitCanvas() {
     updatePageMarks(pages, pageH);
   }
   if (paper.style.height !== h + 'px') paper.style.height = h + 'px';
+  // a transform doesn't resize the layout box, so give the scroller the
+  // on-screen size of the scaled page
+  paperFit.style.height = Math.round(h * paperZoom) + 'px';
   canvas.style.height = h + 'px';
-  canvas.width = Math.round(w * dpr);
-  canvas.height = Math.round(h * dpr);
+  // backing store follows the *screen* size so ink stays crisp when zoomed out
+  canvas.width = Math.round(PAPER_W * paperZoom * dpr);
+  canvas.height = Math.round(h * paperZoom * dpr);
   redraw();
 }
-new ResizeObserver(fitCanvas).observe(paper);
+new ResizeObserver(fitCanvas).observe(paperScroll);
 
 // ── insert a blank page at a boundary: text below shifts one page via a
 // full-page spacer spliced into the markdown; ink below shifts one page in
@@ -1301,13 +1319,12 @@ new ResizeObserver(fitCanvas).observe(paper);
 function insertBlankPage(pageIndex) {
   if (!note) return;
   commitPaperEdit();
-  const pageHcss = Math.round(paper.clientWidth * A4_RATIO);
-  const boundaryCss = pageIndex * pageHcss;
+  const boundary = pageIndex * PAGE_H_LOGICAL; // page px == stroke units
 
   // map the boundary to a position in the markdown source: find the first
   // rendered block that starts below it, then splice before its source token
   const kids = [...rendered.children];
-  let target = kids.findIndex(k => k.offsetTop >= boundaryCss);
+  let target = kids.findIndex(k => k.offsetTop >= boundary);
   const tokens = marked.lexer(note.body || '').filter(t => t.type !== 'space');
   let offset = (note.body || '').length; // default: append at the end
   if (target !== -1 && target < tokens.length) {
@@ -1323,10 +1340,9 @@ function insertBlankPage(pageIndex) {
   const spacer = '\n\n<div class="md-page-gap"></div>\n\n';
   note.body = (note.body || '').slice(0, offset) + spacer + (note.body || '').slice(offset);
 
-  // shift ink at/below the boundary down one page (logical units)
-  const boundaryLogical = pageIndex * PAGE_H_LOGICAL;
+  // shift ink at/below the boundary down one page
   for (const s of note.strokes || [])
-    if (s.points.length && Math.min(...s.points.map(p => p.y)) >= boundaryLogical)
+    if (s.points.length && Math.min(...s.points.map(p => p.y)) >= boundary)
       for (const p of s.points) p.y += PAGE_H_LOGICAL;
 
   note.updated = Date.now();
@@ -1336,7 +1352,7 @@ function insertBlankPage(pageIndex) {
   socket.emit('note:reload', { id: note.id });
 }
 
-rendered.parentElement.parentElement.addEventListener('click', (e) => {
+paperScroll.addEventListener('click', (e) => {
   const b = e.target.closest('.page-insert');
   if (b) insertBlankPage(+b.dataset.page);
 });
@@ -1378,11 +1394,14 @@ function followCaret() {
   paperScroll.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
 }
 
+// screen px -> page px: read the live scale off the canvas rect so this holds
+// whatever the device size or zoom is
 function toLogical(e) {
   const r = canvas.getBoundingClientRect();
+  const k = r.width ? PAPER_W / r.width : 1;
   return {
-    x: (e.clientX - r.left) / scaleFactor,
-    y: (e.clientY - r.top) / scaleFactor,
+    x: (e.clientX - r.left) * k,
+    y: (e.clientY - r.top) * k,
     p: e.pressure && e.pressure > 0 ? e.pressure : 0.5
   };
 }
@@ -1472,8 +1491,8 @@ function drawPenOutline(s) {
 }
 
 function redraw() {
-  ctx.setTransform(dpr * scaleFactor, 0, 0, dpr * scaleFactor, 0, 0);
-  ctx.clearRect(0, 0, PAPER_W, canvas.height / (dpr * scaleFactor));
+  ctx.setTransform(dpr * paperZoom, 0, 0, dpr * paperZoom, 0, 0);
+  ctx.clearRect(0, 0, PAPER_W, canvas.height / (dpr * paperZoom));
   if (!note) return;
   for (const s of note.strokes) drawStroke(s);
   for (const s of liveRemote.values()) drawStroke(s);
@@ -1555,7 +1574,7 @@ canvas.addEventListener('pointermove', (e) => {
   // in A4 mode, add the next page before the pen hits the bottom edge
   const lastPt = activeStroke.points[activeStroke.points.length - 1];
   if (lastPt && note.pageMode !== 'infinite' &&
-      lastPt.y * scaleFactor > canvas.clientHeight - 60) fitCanvas();
+      lastPt.y > canvas.clientHeight - 60) fitCanvas();
   redraw();
 });
 

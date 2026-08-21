@@ -93,10 +93,19 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   color:#C9CFDA; padding:22px 24px; font-family:'IBM Plex Mono',monospace;
   font-size:13.5px; line-height:1.65; border-right:1px solid var(--line-soft)}
 
-.paper-scroll{overflow-y:auto; background:
+.paper-scroll{overflow-y:auto; overflow-x:hidden; background:
   radial-gradient(900px 400px at 60% -80px, #2B313B 0%, transparent 60%), var(--desk);
-  padding:26px 20px 60px; display:flex; justify-content:center}
-.paper{position:relative; width:var(--paper-w); max-width:100%;
+  padding:26px 20px 60px; display:flex; justify-content:center; align-items:flex-start}
+/* The page is ALWAYS --paper-w wide in its own coordinates; only the on-screen
+   scale changes. .paper-fit carries the scaled-down size in the layout (a
+   transform doesn't), --zoom is set by fitCanvas(). Because nothing inside the
+   page reflows, text, code tiles, page breaks and ink all sit at the same
+   coordinates on a phone as on a desktop. */
+.paper-fit{position:relative; width:100%; min-width:0; max-width:var(--paper-w);
+  min-height:400px; flex:0 1 auto}
+.paper{position:relative; width:var(--paper-w);
+  transform-origin:top left; transform:scale(var(--zoom,1));
+  -webkit-text-size-adjust:100%; text-size-adjust:100%;
   background:var(--paper); color:#22252B; border-radius:3px;
   box-shadow:0 1px 0 var(--paper-edge) inset, 0 18px 45px rgba(0,0,0,.5);
   min-height:400px}
@@ -293,6 +302,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   background:var(--desk-2); border:1px solid var(--line); border-radius:8px;
   padding:4px 5px; box-shadow:0 10px 28px rgba(0,0,0,.45); user-select:none}
 .text-toolbar[hidden]{display:none}
+.text-toolbar{transform:scale(var(--inv-zoom,1)); transform-origin:top left}
 .text-toolbar button{background:var(--desk); color:var(--text); border:1px solid var(--line);
   border-radius:6px; min-width:30px; padding:4px 7px; font-size:12.5px; line-height:1.2;
   font-family:'IBM Plex Sans',system-ui,sans-serif}
@@ -303,6 +313,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 /* ───────── A4 page marks on the paper ───────── */
 #page-marks{position:absolute; inset:0; pointer-events:none; z-index:2}
 .page-sep{position:absolute; left:0; right:0; border-top:2px dashed #C6BB9E}
+/* page-break chrome is UI, not page content — undo the page scale so it stays
+   legible/tappable when the page is shrunk to fit a phone */
+.page-insert{transform:scale(var(--inv-zoom,1)); transform-origin:left center}
+.page-sep::after{transform:scale(var(--inv-zoom,1)); transform-origin:right center}
 .page-insert{pointer-events:auto; position:absolute; left:14px; top:-11px;
   font:10.5px 'IBM Plex Mono',monospace; color:#93876A; background:var(--paper);
   border:1px dashed #C6BB9E; border-radius:5px; padding:2px 8px; cursor:pointer;
@@ -324,7 +338,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .panes{display:block !important; height:auto !important}
   .paper-scroll{display:block !important; overflow:visible !important;
     padding:0 !important; background:#fff !important; height:auto !important}
+  .paper-fit{width:auto !important; max-width:none !important; height:auto !important}
   .paper{margin:0 !important; box-shadow:none !important; border-radius:0 !important;
+    transform:none !important;   /* print at true page size, not the screen fit */
     zoom:0.9679;             /* 820px paper → 210mm A4 width; page height lands on A4 */
     background:var(--paper) !important}
   .code-tile{box-shadow:none}
