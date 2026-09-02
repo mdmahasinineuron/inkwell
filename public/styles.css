@@ -28,7 +28,7 @@ input,textarea,select{font-family:inherit}
 /* ───────── notebooks rail ───────── */
 .rail{background:var(--desk-3); border-right:1px solid var(--line-soft);
   display:flex; flex-direction:column; min-width:0; min-height:0; position:relative}
-.brand{display:flex; align-items:center; gap:9px; padding:16px 16px 12px;
+.brand{display:flex; align-items:center; gap:9px; padding:11px 16px 9px;
   font-weight:600; font-size:16px; letter-spacing:.01em}
 .nib{display:inline-grid; place-items:center; width:26px; height:26px; border-radius:7px;
   background:linear-gradient(150deg,var(--ink),#12264A); color:var(--paper);
@@ -37,12 +37,20 @@ input,textarea,select{font-family:inherit}
   padding:12px 16px 6px; font-family:'IBM Plex Mono',monospace; font-size:11px;
   letter-spacing:.09em; text-transform:uppercase; color:var(--dimmer)}
 .notebook-list{flex:1; overflow-y:auto; padding:0 8px}
-.notebook{padding:8px 10px; border-radius:7px; font-size:14px; color:var(--dim);
+.notebook{padding:7px 10px; border-radius:7px; font-size:14px; color:var(--dim);
   cursor:pointer; display:flex; justify-content:space-between; gap:6px; align-items:center}
 .notebook:hover{background:var(--desk-2); color:var(--text)}
 .notebook.on{background:var(--desk-2); color:var(--text);
   box-shadow:inset 2px 0 0 var(--ink-bright)}
 .notebook .count{font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--dimmer)}
+.notebook .nb-name{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.notebook.all{border-bottom:1px solid var(--line-soft); border-radius:7px 7px 0 0; margin-bottom:4px}
+.nb-del{display:none; background:transparent; border:0; color:var(--dimmer);
+  font-size:12px; line-height:1; padding:3px 4px; border-radius:5px; margin-left:2px}
+.notebook:hover .nb-del{display:block}
+.nb-del:hover{background:#3A2226; color:#E8A7AC}
+.dialog-text{margin:2px 0 4px; font-size:13.5px; line-height:1.6; color:var(--dim)}
+.dialog-text b{color:var(--text)}
 .rail-foot{padding:12px 16px; border-top:1px solid var(--line-soft);
   display:flex; justify-content:space-between; align-items:center; gap:8px}
 .presence{font-size:12px; color:#7FC98F; font-family:'IBM Plex Mono',monospace}
@@ -51,7 +59,7 @@ input,textarea,select{font-family:inherit}
 /* ───────── notes column ───────── */
 .notes-col{background:var(--desk-2); border-right:1px solid var(--line-soft);
   display:flex; flex-direction:column; min-width:0; min-height:0; position:relative}
-.notes-head{display:flex; gap:8px; padding:12px}
+.notes-head{display:flex; gap:8px; padding:8px 10px}
 #search{flex:1; min-width:0; background:var(--desk); border:1px solid var(--line);
   border-radius:7px; padding:8px 10px; color:var(--text); font-size:13.5px; outline:none}
 #search:focus{border-color:var(--ink-bright)}
@@ -69,15 +77,17 @@ input,textarea,select{font-family:inherit}
 
 /* ───────── editor + paper ───────── */
 .work{display:flex; flex-direction:column; min-width:0; min-height:0; overflow:hidden}
-.toolbar{display:flex; gap:10px; align-items:center; padding:10px 14px;
+.toolbar{display:flex; gap:7px; align-items:center; padding:4px 10px;
   border-bottom:1px solid var(--line-soft); background:var(--desk-2)}
 #title{flex:1; min-width:0; background:transparent; border:0; outline:none;
-  color:var(--text); font-size:17px; font-weight:600; padding:6px 4px}
+  color:var(--text); font-size:14.5px; font-weight:600; padding:3px 4px}
 #title::placeholder{color:var(--dimmer)}
-.tool-actions{display:flex; gap:8px}
+.tool-actions{display:flex; gap:5px}
 .toolbar button, .pen-tray button, .dialog button, .notes-head button{
   background:var(--desk); color:var(--text); border:1px solid var(--line);
-  border-radius:7px; padding:7px 12px; font-size:13px}
+  border-radius:6px; padding:7px 12px; font-size:13px}
+/* the top strip is chrome, not page — keep it thin so the paper gets the room */
+.toolbar button{padding:4px 8px; font-size:12px; line-height:1.35}
 .toolbar button:hover{border-color:var(--dim)}
 button.primary{background:var(--ink-bright); border-color:var(--ink-bright); color:#0D1526; font-weight:600}
 button.primary:hover{filter:brightness(1.08)}
@@ -95,7 +105,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .paper-scroll{overflow-y:auto; overflow-x:hidden; background:
   radial-gradient(900px 400px at 60% -80px, #2B313B 0%, transparent 60%), var(--desk);
-  padding:26px 20px 60px; display:flex; justify-content:center; align-items:flex-start}
+  padding:12px 18px 60px; display:flex; justify-content:center; align-items:flex-start}
 /* The page is ALWAYS --paper-w wide in its own coordinates; only the on-screen
    scale changes. .paper-fit carries the scaled-down size in the layout (a
    transform doesn't), --zoom is set by fitCanvas(). Because nothing inside the
@@ -153,6 +163,53 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .rendered th,.rendered td{border:1px solid #D5CCB4; padding:6px 10px; font-size:14px}
 .rendered img{max-width:100%}
 
+/* ───────── pictures on the page ─────────
+   Every picture is stored and placed in PAGE coordinates (the same 820-wide
+   space as text, code tiles and ink), and the layer is a plain child of
+   .paper — so the page's CSS scale carries it. Zooming in or out, or opening
+   the note on a phone, moves and sizes a picture by exactly the same factor
+   as the words around it: nothing to recompute, nothing to drift. */
+/* Three stacked planes inside the page: pictures sent behind the words, the
+   words themselves, then pictures left in front. The layers never take a
+   click of their own — only the pictures on them do — so text underneath
+   stays as clickable as it ever was. */
+.img-layer{position:absolute; inset:0; z-index:3; pointer-events:none}
+.img-layer.back{z-index:1}
+.rendered{position:relative; z-index:2}
+.pimg{position:absolute; cursor:grab; touch-action:none; pointer-events:none;
+  outline:1px solid transparent; border-radius:2px}
+.paper:not(.inking) .pimg{pointer-events:auto}
+.pimg img{display:block; width:100%; height:100%; -webkit-user-drag:none; user-select:none}
+.paper:not(.inking) .pimg:hover{outline-color:rgba(29,58,110,.35)}
+.pimg.on{cursor:grab; outline:1.5px solid var(--ink-bright);
+  box-shadow:0 6px 22px rgba(0,0,0,.25)}
+.pimg.dragging{cursor:grabbing; opacity:.92}
+/* grips are UI: counter-scale them so they stay a constant size on screen */
+.pimg .pimg-h{display:none}
+.pimg.on .pimg-h{display:block}
+.pimg-h{position:absolute; width:12px; height:12px; border-radius:50%;
+  background:var(--ink-bright); border:2px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,.4);
+  transform:translate(-50%,-50%) scale(var(--inv-zoom,1))}
+.pimg-h.nw{left:0;    top:0;    cursor:nwse-resize}
+.pimg-h.ne{left:100%; top:0;    cursor:nesw-resize}
+.pimg-h.sw{left:0;    top:100%; cursor:nesw-resize}
+.pimg-h.se{left:100%; top:100%; cursor:nwse-resize}
+
+.img-toolbar{position:absolute; z-index:9; display:flex; gap:3px; align-items:center;
+  background:var(--desk-2); border:1px solid var(--line); border-radius:8px;
+  padding:4px 5px; box-shadow:0 10px 28px rgba(0,0,0,.45); user-select:none;
+  flex-wrap:wrap; transform:scale(var(--inv-zoom,1)); transform-origin:top left}
+.img-toolbar[hidden]{display:none}
+.img-toolbar button{background:var(--desk); color:var(--text); border:1px solid var(--line);
+  border-radius:6px; min-width:26px; padding:4px 8px; font-size:12px; line-height:1.2;
+  font-family:'IBM Plex Sans',system-ui,sans-serif}
+.img-toolbar button:hover{border-color:var(--ink-bright); color:#fff}
+.img-toolbar button.on{background:var(--ink-bright); border-color:var(--ink-bright); color:#0D1526}
+.img-toolbar .im-danger{color:#E8A7AC; border-color:#5A343A}
+.img-toolbar .im-danger:hover{background:#3A2226; border-color:#8A4A52}
+/* while the pen is out, pictures are just background to draw on */
+.paper.inking .pimg{outline-color:transparent}
+
 #ink-canvas{position:absolute; inset:0; width:100%; pointer-events:none; z-index:5}
 .paper.inking #ink-canvas{pointer-events:auto; cursor:crosshair; touch-action:none}
 /* on a phone a slow press would otherwise pop the selection/callout menu and
@@ -162,25 +219,26 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 /* ───────── Draw ribbon (OneNote scheme): docked under the toolbar ───────── */
 .work{position:relative}
-.pen-tray{display:flex; align-items:flex-end; gap:8px; overflow-x:auto; overflow-y:visible;
-  padding:4px 12px 0; min-height:58px; background:var(--desk-2);
+.pen-tray{display:flex; align-items:flex-end; gap:6px; overflow-x:auto; overflow-y:visible;
+  padding:2px 10px 0; min-height:44px; background:var(--desk-2);
   border-bottom:1px solid var(--line-soft)}
 .ribbon-group{display:flex; gap:2px; align-items:center; align-self:center}
 .tray-sep{width:1px; align-self:stretch; background:var(--line-soft); margin:6px 2px}
 
-.ribbon-btn{display:flex; flex-direction:column; align-items:center; gap:2px;
+.ribbon-btn{display:flex; flex-direction:column; align-items:center; gap:1px;
   align-self:center; background:transparent; border:1px solid transparent;
-  border-radius:6px; color:var(--dim); padding:6px 8px; font-size:10.5px; cursor:pointer}
+  border-radius:6px; color:var(--dim); padding:3px 7px; font-size:10px; cursor:pointer}
 .ribbon-btn:hover{background:var(--desk); color:var(--text); border-color:var(--line-soft)}
 .ribbon-btn.on{background:var(--desk); color:var(--ink-bright); border-color:var(--ink-bright)}
 .ribbon-btn svg{display:block}
 
 /* pen gallery: vertical pens, tips down; the selected one rises (OneNote) */
 .pen-gallery{display:flex; align-items:flex-end; gap:1px; padding:0 2px; overflow:visible}
-.pen-item{background:transparent; border:0; padding:0 4px; cursor:pointer;
-  position:relative; height:56px; display:flex; align-items:flex-end;
-  transform:translateY(12px); transition:transform .13s ease}
-.pen-item:hover{transform:translateY(6px)}
+.pen-item{background:transparent; border:0; padding:0 3px; cursor:pointer;
+  position:relative; height:42px; display:flex; align-items:flex-end;
+  transform:translateY(10px); transition:transform .13s ease}
+.pen-item svg{height:38px; width:auto}
+.pen-item:hover{transform:translateY(5px)}
 .pen-item.on{transform:translateY(0)}
 .pen-item.on::after{content:'▾'; position:absolute; top:1px; left:50%;
   transform:translateX(-50%); font-size:8px; color:var(--dim)}
@@ -301,17 +359,37 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .pe-active:focus{outline:none}
 .pe-new:empty::before{content:'Type here…'; color:#A79C82; pointer-events:none}
 
-.text-toolbar{position:absolute; z-index:8; display:flex; gap:3px; align-items:center;
+.text-toolbar{position:absolute; z-index:8; display:flex; flex-direction:column; gap:3px;
   background:var(--desk-2); border:1px solid var(--line); border-radius:8px;
   padding:4px 5px; box-shadow:0 10px 28px rgba(0,0,0,.45); user-select:none}
 .text-toolbar[hidden]{display:none}
 .text-toolbar{transform:scale(var(--inv-zoom,1)); transform-origin:top left}
+.tt-row{display:flex; gap:3px; align-items:center; flex-wrap:wrap}
 .text-toolbar button{background:var(--desk); color:var(--text); border:1px solid var(--line);
-  border-radius:6px; min-width:30px; padding:4px 7px; font-size:12.5px; line-height:1.2;
+  border-radius:6px; min-width:28px; padding:3px 6px; font-size:12.5px; line-height:1.2;
   font-family:'IBM Plex Sans',system-ui,sans-serif}
 .text-toolbar button:hover{border-color:var(--ink-bright); color:#fff}
 .text-toolbar button.on{background:var(--ink-bright); border-color:var(--ink-bright); color:#0D1526}
 .text-toolbar .tt-sep{width:1px; align-self:stretch; background:var(--line-soft); margin:2px 2px}
+.text-toolbar .tt-mono{font-family:'IBM Plex Mono',monospace; font-size:11px}
+.text-toolbar button{display:inline-flex; align-items:center; justify-content:center}
+.text-toolbar button svg{display:block}
+.text-toolbar .tt-done{margin-left:auto; font-weight:600}
+#tt-block{background:var(--desk); color:var(--text); border:1px solid var(--line);
+  border-radius:6px; padding:3px 4px; font-size:12px; max-width:118px}
+#tt-block:focus{outline:none; border-color:var(--ink-bright)}
+/* colour buttons carry a swatch of the shade they will apply */
+.tt-swatchbtn{position:relative; padding-bottom:7px !important}
+.tt-swatchbtn i{position:absolute; left:4px; right:4px; bottom:2px; height:3px;
+  border-radius:2px; background:#B3232A}
+.tt-palette{display:grid; grid-template-columns:repeat(9, 1fr); gap:4px;
+  padding:5px 2px 2px; border-top:1px solid var(--line-soft)}
+.tt-palette[hidden]{display:none}
+.tt-chip{width:18px; height:18px; border-radius:5px; padding:0 !important;
+  min-width:0 !important; border:1px solid var(--line) !important; cursor:pointer}
+.tt-chip.none{background:var(--desk); color:var(--dim); font-size:10px}
+.tt-chip{border-color:rgba(255,255,255,.22) !important}
+.tt-chip:hover{box-shadow:0 0 0 2px var(--ink-bright)}
 
 /* ───────── A4 page marks on the paper ───────── */
 #page-marks{position:absolute; inset:0; pointer-events:none; z-index:2}
@@ -335,7 +413,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   @page{ size:A4; margin:0 }
   html,body{overflow:visible !important; background:#fff}
   .rail,.notes-col,.toolbar,#editor,.pen-tray,.pen-pop,.rz,#drawer-backdrop,
-  .overlay,#page-marks,#text-toolbar{display:none !important}
+  .overlay,#page-marks,#text-toolbar,#img-toolbar,.pimg-h{display:none !important}
+  .pimg{outline:none !important; box-shadow:none !important}
   .app{display:block !important; height:auto !important}
   .work{display:block !important; height:auto !important; overflow:visible !important}
   .panes{display:block !important; height:auto !important}

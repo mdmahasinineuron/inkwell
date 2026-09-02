@@ -48,6 +48,7 @@
         <button id="btn-pagemode" title="Page style: A4 pages / infinite scroll">📄 A4</button>
         <button id="btn-code" title="Insert code block (Ctrl+Shift+K)">{ } Code block</button>
         <button id="btn-ink" title="Draw over the note">✎ Ink</button>
+        <button id="btn-image" title="Insert an image — or just paste one with Ctrl+V">🖼 Image</button>
         <button id="btn-export" title="Download as Markdown">.md</button>
         <button id="btn-pdf" title="Export as PDF (A4)">PDF</button>
         <button id="btn-delete" class="danger" title="Delete note">Delete</button>
@@ -97,17 +98,62 @@
              measures the same on every device. -->
         <div class="paper-fit" id="paper-fit">
           <div class="paper" id="paper">
+            <!-- pictures parked behind the text (see .img-layer in the CSS) -->
+            <div class="img-layer back" id="img-layer-back"></div>
             <div class="rendered" id="rendered"></div>
+            <!-- pasted/dropped pictures: positioned in page coordinates, so the
+                 whole layer scales with the page and never drifts on zoom -->
+            <div class="img-layer" id="img-layer"></div>
             <canvas id="ink-canvas"></canvas>
+
+            <!-- floating bar for the selected picture -->
+            <div class="img-toolbar" id="img-toolbar" hidden>
+              <button id="im-copy" title="Copy picture (Ctrl+C)">Copy</button>
+              <button id="im-dupe" title="Duplicate (Ctrl+D)">Duplicate</button>
+              <span class="tt-sep"></span>
+              <button id="im-smaller" title="Shrink 10%">−</button>
+              <button id="im-fit" title="Fit to the page width">Fit</button>
+              <button id="im-bigger" title="Grow 10%">+</button>
+              <span class="tt-sep"></span>
+              <button id="im-front" title="Send behind / bring in front of the text">Behind</button>
+              <button id="im-delete" class="im-danger" title="Delete picture (Del)">Delete</button>
+            </div>
             <!-- floating format bar for inline editing on the paper -->
             <div class="text-toolbar" id="text-toolbar" hidden>
-              <button id="tt-bold" title="Bold (Ctrl+B)"><b>B</b></button>
-              <button id="tt-italic" title="Italic (Ctrl+I)"><i>I</i></button>
-              <span class="tt-sep"></span>
-              <button id="tt-smaller" title="Smaller text">A−</button>
-              <button id="tt-bigger" title="Larger text">A+</button>
-              <span class="tt-sep"></span>
-              <button id="tt-done" title="Done (Esc)">✓</button>
+              <div class="tt-row">
+                <select id="tt-block" title="Paragraph style">
+                  <option value="p">Paragraph</option>
+                  <option value="h1">Heading 1</option>
+                  <option value="h2">Heading 2</option>
+                  <option value="h3">Heading 3</option>
+                  <option value="h4">Heading 4</option>
+                  <option value="ul">Bullet list</option>
+                  <option value="ol">Numbered list</option>
+                  <option value="blockquote">Quote</option>
+                </select>
+                <span class="tt-sep"></span>
+                <button id="tt-bold" title="Bold (Ctrl+B)"><b>B</b></button>
+                <button id="tt-italic" title="Italic (Ctrl+I)"><i>I</i></button>
+                <button id="tt-underline" title="Underline (Ctrl+U)"><u>U</u></button>
+                <button id="tt-strike" title="Strikethrough"><s>S</s></button>
+                <button id="tt-code" title="Inline code" class="tt-mono">&lt;/&gt;</button>
+                <button id="tt-link" title="Link (Ctrl+K)"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6.6 9.4a3 3 0 0 0 4.3 0l2-2a3 3 0 0 0-4.3-4.3l-1 1"/><path d="M9.4 6.6a3 3 0 0 0-4.3 0l-2 2a3 3 0 0 0 4.3 4.3l1-1"/></svg></button>
+                <span class="tt-sep"></span>
+                <button id="tt-smaller" title="Smaller text">A−</button>
+                <button id="tt-bigger" title="Larger text">A+</button>
+              </div>
+              <div class="tt-row">
+                <button id="tt-color" class="tt-swatchbtn" title="Text colour">A<i id="tt-color-dot"></i></button>
+                <button id="tt-highlight" class="tt-swatchbtn" title="Highlight">▮<i id="tt-hl-dot"></i></button>
+                <span class="tt-sep"></span>
+                <button id="tt-align-left" title="Align left"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M2 7h7M2 10.5h12M2 14h7"/></svg></button>
+                <button id="tt-align-center" title="Centre"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M4.5 7h7M2 10.5h12M4.5 14h7"/></svg></button>
+                <button id="tt-align-right" title="Align right"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 3.5h12M7 7h7M2 10.5h12M7 14h7"/></svg></button>
+                <span class="tt-sep"></span>
+                <button id="tt-clear" title="Clear formatting"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 3h7M6 3.4v9.2"/><path d="M10 8.2l4.4 4.4M14.4 8.2L10 12.6"/></svg></button>
+                <button id="tt-done" class="tt-done" title="Done (Esc)">✓ Done</button>
+              </div>
+              <div class="tt-palette" id="tt-palette" hidden></div>
             </div>
           </div>
         </div>
@@ -139,6 +185,22 @@
   </div>
 </div>
 
+<!-- ───────── delete notebook dialog ───────── -->
+<div class="overlay" id="nbdel-overlay" hidden>
+  <div class="dialog small">
+    <div class="dialog-head">
+      <span>Delete notebook</span>
+      <button class="ghost" id="nbdel-x">✕</button>
+    </div>
+    <p class="dialog-text" id="nbdel-text"></p>
+    <div class="dialog-foot">
+      <button id="nbdel-cancel">Cancel</button>
+      <button id="nbdel-keep">Keep the notes</button>
+      <button id="nbdel-all" class="danger">Delete notes too</button>
+    </div>
+  </div>
+</div>
+
 <!-- ───────── code block dialog ───────── -->
 <div id="drawer-backdrop"></div>
 <div class="overlay" id="code-overlay" hidden>
@@ -157,6 +219,8 @@
     </div>
   </div>
 </div>
+
+<input type="file" id="image-file" accept="image/*" multiple hidden>
 
 <script src="/socket.io/socket.io.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>

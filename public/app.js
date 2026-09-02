@@ -29,6 +29,7 @@ const titleEl = $('#title'), editor = $('#editor'), rendered = $('#rendered');
 const paper = $('#paper'), paperFit = $('#paper-fit'), paperScroll = $('#paper-scroll');
 const canvas = $('#ink-canvas'), ctx = canvas.getContext('2d');
 const penTray = $('#pen-tray'), pressureOut = $('#pressure-readout');
+const imgLayer = $('#img-layer'), imgBack = $('#img-layer-back'), imgTb = $('#img-toolbar');
 const presenceEl = $('#presence');
 
 // ───────────────────────────── state ─────────────────────────────────────
@@ -96,14 +97,13 @@ socket.on('note:reload', async (msg) => {
   if (note && msg.id === note.id) {
     const n = await api('/notes/' + msg.id);
     if (!n) return;
-    n.strokes = Array.isArray(n.strokes) ? n.strokes : [];
-    n.codeTiles = n.codeTiles && typeof n.codeTiles === 'object' ? n.codeTiles : {};
-    if (n.pageMode !== 'infinite') n.pageMode = 'a4';
+    normalizeNote(n);
     note = n;
     if (document.activeElement !== titleEl) titleEl.value = n.title || '';
     if (document.activeElement !== editor) editor.value = n.body || '';
     pageModeLabel();
     renderMarkdown();
+    renderImages();
     redraw();
   }
   notesMeta = await api('/notes') || notesMeta;
@@ -394,13 +394,28 @@ function peInlineNode(ch) {
   if (tag === 'CODE') return '`' + ch.textContent + '`';
   if (tag === 'A') return '[' + inner + '](' + (ch.getAttribute('href') || '') + ')';
   if (tag === 'U') return '<u>' + inner + '</u>';
+  if (tag === 'MARK') return inner.trim() ? '<mark>' + inner + '</mark>' : inner;
+  if (tag === 'FONT') {                       // execCommand leftovers
+    const c = ch.getAttribute('color');
+    return c && inner.trim() ? `<span style="color:${c}">` + inner + '</span>' : inner;
+  }
   if (tag === 'SPAN') {
     let out = inner;
-    if (ch.style && ch.style.fontWeight && /^(bold|[6-9]00)$/.test(ch.style.fontWeight))
+    const st = ch.style || {};
+    if (st.fontWeight && /^(bold|[6-9]00)$/.test(st.fontWeight))
       out = out.trim() ? '**' + out + '**' : out;
-    if (ch.style && ch.style.fontStyle === 'italic') out = out.trim() ? '*' + out + '*' : out;
-    if (ch.style && ch.style.fontSize)
-      out = `<span style="font-size:${ch.style.fontSize}">` + out + '</span>';
+    if (st.fontStyle === 'italic') out = out.trim() ? '*' + out + '*' : out;
+    // font-size / colour / highlight / decoration have no Markdown of their
+    // own, so they ride along as an inline span — Markdown allows raw HTML,
+    // and marked + DOMPurify keep it intact on the way back.
+    const css = [];
+    if (st.fontSize) css.push('font-size:' + st.fontSize);
+    if (st.color) css.push('color:' + st.color);
+    if (st.backgroundColor) css.push('background-color:' + st.backgroundColor);
+    const deco = st.textDecorationLine || st.textDecoration || '';
+    if (/underline/.test(deco)) css.push('text-decoration:underline');
+    else if (/line-through/.test(deco)) css.push('text-decoration:line-through');
+    if (css.length && out.trim()) out = `<span style="${css.join(';')}">` + out + '</span>';
     return out;
   }
   if (tag === 'DIV' || tag === 'P') return '\n' + peInline(ch); // Enter inside a block
@@ -429,8 +444,23 @@ function peListMd(listEl, indent) {
   }
   return lines.join('\n');
 }
+// A block with a text alignment has no Markdown equivalent, so it is written
+// back as the HTML element itself. marked passes a block of raw HTML straight
+// through, so the block round-trips exactly — including whatever inline
+// formatting is inside it.
+const ALIGNABLE = /^(P|H[1-6]|UL|OL|BLOCKQUOTE)$/;
+function blockAlign(el) {
+  const a = el.style && el.style.textAlign;
+  return (a === 'center' || a === 'right' || a === 'justify') ? a : '';
+}
+
 function domBlockToMd(el) {
   const tag = el.tagName;
+  const align = blockAlign(el);
+  if (align && ALIGNABLE.test(tag)) {
+    const t = tag.toLowerCase();
+    return `<${t} style="text-align:${align}">${el.innerHTML}</${t}>`;
+  }
   if (/^H[1-6]$/.test(tag))
     return '#'.repeat(+tag[1]) + ' ' + peInline(el).replace(/\n+/g, ' ').trim();
   if (tag === 'BLOCKQUOTE') {
@@ -490,26 +520,64 @@ function placeCaretAt(x, y) {
   }
 }
 
+// Both floating bars are counter-scaled by --inv-zoom, so they end up drawn
+// at 1:1 on screen however small the page is — which means their CSS pixels
+// ARE screen pixels, and a bar wider than the page on screen would hang off
+// the edge. Capping max-width to the page's on-screen width lets the rows
+// wrap instead, so the bar stays whole on a phone and on a squeezed pane.
+function fitFloatingBar(el) {
+  // the page fills the scroller's content box, so it may spill a little way
+  // into the padding beside it — but no further
+  const pageScreenW = paper.getBoundingClientRect().width || PAPER_W;
+  el.style.maxWidth = Math.max(120, Math.round(pageScreenW + 14)) + 'px';
+}
+
 function positionTextToolbar() {
   const s = peSession;
   if (!s) return;
-  // the bar is counter-scaled so it stays readable, so its footprint on the
-  // page grows as the page shrinks — budget for that when placing it
+  fitFloatingBar(ttEl);
+  // the bar's footprint measured back in page coordinates, where it is placed
   const iz = 1 / (paperZoom || 1);
-  ttEl.style.top = Math.max(6, s.el.offsetTop - 46 * iz) + 'px';
+  const w = (ttEl.offsetWidth || 300) * iz;
+  const h = (ttEl.offsetHeight || 40) * iz;
+  let top = s.el.offsetTop - (h + 8);
+  if (top < 6) top = s.el.offsetTop + s.el.offsetHeight + 8;  // no room above → sit below
+  ttEl.style.top = Math.max(6, Math.min(top, Math.max(6, paper.clientHeight - h - 6))) + 'px';
   ttEl.style.left = Math.min(Math.max(8, s.el.offsetLeft),
-                             Math.max(8, paper.clientWidth - 235 * iz)) + 'px';
+                             Math.max(8, paper.clientWidth - w - 8)) + 'px';
 }
 
 function beginPeSession(el, ev) {
+  deselectImage();          // only one floating bar on the page at a time
   el.classList.add('pe-active');
   el.setAttribute('contenteditable', 'true');
   el.addEventListener('input', onPeInput);
   try { document.execCommand('styleWithCSS', false, false); } catch {}
   el.focus();
   if (ev && getSelection().isCollapsed) placeCaretAt(ev.clientX, ev.clientY);
-  positionTextToolbar();
   ttEl.hidden = false;
+  hidePalette();
+  positionTextToolbar();               // now that it has a measurable size
+  requestAnimationFrame(positionTextToolbar);
+  syncBlockSelect();
+  refreshTtState();
+}
+
+// put the caret at the end of a block (after a block-type conversion)
+function focusEnd(el) {
+  const r = document.createRange();
+  r.selectNodeContents(el);
+  r.collapse(false);
+  const sel = getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+function selectBlockContents(el) {
+  const r = document.createRange();
+  r.selectNodeContents(el);
+  const sel = getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
 }
 
 function startPaperEdit(el, ev) {
@@ -540,6 +608,7 @@ function commitPaperEdit() {
   s.el.classList.remove('pe-active');
   if (s.isNew && !s.spliced) s.el.remove(); // empty new paragraph → vanish
   ttEl.hidden = true;
+  hidePalette();
   renderMarkdown(); // normalize what the browser produced while editing
   requestAnimationFrame(fitCanvas);
 }
@@ -548,6 +617,7 @@ function dropPaperEdit() { // note is switching/deleted: don't serialize into it
   peSession.el.removeEventListener('input', onPeInput);
   peSession = null;
   ttEl.hidden = true;
+  hidePalette();
 }
 
 // ---- click routing on the paper ------------------------------------------
@@ -555,7 +625,8 @@ const PE_EDITABLE = /^(P|H[1-6]|UL|OL|BLOCKQUOTE)$/;
 
 paper.addEventListener('click', (e) => {
   if (inkMode || !note) return;
-  if (e.target.closest('#text-toolbar, .page-insert, .code-tile, #page-marks')) return;
+  if (e.target.closest('#text-toolbar, .page-insert, .code-tile, #page-marks, ' +
+                       '.pimg, #img-toolbar')) return;
   if (e.target.closest('a') && !(peSession && peSession.el.contains(e.target))) return; // let links work
   // which top-level block was clicked (if any)?
   let el = e.target;
@@ -569,7 +640,13 @@ paper.addEventListener('click', (e) => {
   if (peSession) return; // clicking away just commits (handled by pointerdown below)
 
   // empty area: insert a new paragraph where you clicked
-  const y = (e.clientY - paper.getBoundingClientRect().top) / paperZoom; // -> page px
+  const pr0 = paper.getBoundingClientRect();
+  const k0 = pr0.width ? PAPER_W / pr0.width : 1;
+  const y = (e.clientY - pr0.top) * k0;              // -> page px
+  // a picture parked behind the text sits under this layer, so a click on the
+  // bare paper over one selects it instead of starting a new paragraph
+  const behind = imageAt((e.clientX - pr0.left) * k0, y, true);
+  if (behind) { selectImage(behind.id); return; }
   const kids = [...rendered.children];
   // a click level with an existing block (its margin) edits that block
   const hit = kids.find(k => PE_EDITABLE.test(k.tagName) &&
@@ -597,7 +674,11 @@ document.addEventListener('pointerdown', (e) => {
 });
 
 // ---- floating toolbar actions --------------------------------------------
-ttEl.addEventListener('pointerdown', (e) => e.preventDefault()); // keep selection/focus
+// preventing the default keeps the caret/selection alive while a button is
+// pressed — but a <select> needs its own default to open at all
+ttEl.addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('select')) e.preventDefault();
+});
 
 function stepSize(cur, dir) {
   let i = SIZE_STEPS.findIndex(s => Math.abs(s - cur) < 0.03);
@@ -632,7 +713,10 @@ function applyFontStep(dir) {
       const anc = f.parentElement && f.parentElement.closest('span[style*="font-size"]');
       if (anc && s.el.contains(anc)) cur = parseFloat(anc.style.fontSize) || 1;
       const innerSpan = f.querySelector('span[style*="font-size"]');
-      if (innerSpan && innerSpan.textContent === f.textContent) {
+      // only absorb a span that carries nothing but the size — one that also
+      // holds a colour has to survive
+      if (innerSpan && innerSpan.textContent === f.textContent &&
+          innerSpan.style.length === 1) {
         cur = parseFloat(innerSpan.style.fontSize) || cur;
         innerSpan.replaceWith(...innerSpan.childNodes);
       }
@@ -669,41 +753,302 @@ function applyFontStep(dir) {
   requestAnimationFrame(fitCanvas);
 }
 
-$('#tt-bold').onclick = () => {
-  if (!peSession) return;
-  document.execCommand('bold', false);
-  syncPaperEdit();
-  refreshTtState();
-};
-$('#tt-italic').onclick = () => {
-  if (!peSession) return;
-  document.execCommand('italic', false);
-  syncPaperEdit();
-  refreshTtState();
-};
-$('#tt-bigger').onclick = () => applyFontStep(+1);
-$('#tt-smaller').onclick = () => applyFontStep(-1);
-$('#tt-done').onclick = () => commitPaperEdit();
+// ---- character formatting -------------------------------------------------
+// Everything here edits the live DOM of the block and then hands it back to
+// syncPaperEdit(), which re-serialises the block into note.body. So a change
+// made on the paper reaches the Markdown pane and the other devices through
+// exactly the same path a keystroke does.
 
+// run a document.execCommand against the block being edited
+function ttCmd(cmd, arg) {
+  if (!peSession) return;
+  peSession.el.focus();
+  try { document.execCommand(cmd, false, arg); } catch {}
+  syncPaperEdit();
+  refreshTtState();
+}
+
+// a whole-block operation needs something selected; if the caret is just
+// sitting there, act on the entire block
+function ensureSelection() {
+  const s = peSession;
+  if (!s) return false;
+  const sel = getSelection();
+  if (sel && sel.rangeCount && !sel.isCollapsed && s.el.contains(sel.anchorNode)) return true;
+  selectBlockContents(s.el);
+  return true;
+}
+
+$('#tt-bold').onclick      = () => ttCmd('bold');
+$('#tt-italic').onclick    = () => ttCmd('italic');
+$('#tt-underline').onclick = () => ttCmd('underline');
+$('#tt-strike').onclick    = () => ttCmd('strikeThrough');
+$('#tt-bigger').onclick    = () => applyFontStep(+1);
+$('#tt-smaller').onclick   = () => applyFontStep(-1);
+$('#tt-done').onclick      = () => commitPaperEdit();
+
+// inline code — `like this`. Clicking inside an existing one unwraps it.
+$('#tt-code').onclick = () => {
+  const s = peSession;
+  if (!s) return;
+  s.el.focus();
+  const sel = getSelection();
+  const anchor = sel && sel.anchorNode;
+  const inCode = anchor && anchor.parentElement && anchor.parentElement.closest('code');
+  if (inCode && s.el.contains(inCode)) {
+    inCode.replaceWith(...inCode.childNodes);
+  } else {
+    if (!sel || sel.isCollapsed) return;   // nothing to mark up
+    const r = sel.getRangeAt(0);
+    if (!s.el.contains(r.commonAncestorContainer)) return;
+    const code = document.createElement('code');
+    try { r.surroundContents(code); }
+    catch { code.appendChild(r.extractContents()); r.insertNode(code); }
+    selectBlockContents(code);
+  }
+  s.el.normalize();
+  syncPaperEdit();
+  refreshTtState();
+};
+
+// link — prompt() steals the selection, so put it back afterwards
+$('#tt-link').onclick = () => {
+  const s = peSession;
+  if (!s) return;
+  const sel = getSelection();
+  const saved = (sel && sel.rangeCount) ? sel.getRangeAt(0).cloneRange() : null;
+  const collapsed = !saved || saved.collapsed;
+  const existing = sel && sel.anchorNode && sel.anchorNode.parentElement &&
+                   sel.anchorNode.parentElement.closest('a');
+  const url = prompt('Link address', existing ? existing.getAttribute('href') : 'https://');
+  s.el.focus();
+  if (saved) { const sl = getSelection(); sl.removeAllRanges(); sl.addRange(saved); }
+  if (url === null) return;
+  if (!url.trim()) { ttCmd('unlink'); return; }
+  if (collapsed) {
+    const text = prompt('Link text', url) || url;
+    ttCmd('insertHTML',
+      `<a href="${url.replace(/"/g, '&quot;')}">${escapeHtml(text)}</a>`);
+  } else {
+    ttCmd('createLink', url);
+  }
+};
+
+// ---- colour + highlight ---------------------------------------------------
+const TEXT_COLORS = ['#22252B', '#5B6069', '#B3232A', '#D2691E', '#B8860B', '#1C7A3D',
+                     '#0F7E7E', '#1D3A6E', '#2F6FDE', '#6B3FA0', '#D4498E', '#7A4B12',
+                     '#8B0000', '#556B2F', '#2F4F4F', '#4B0082', '#8B4513', '#000000'];
+const HL_COLORS   = ['#FFF27A', '#FFE01A', '#C8F08F', '#8CE04A', '#A5E8FF', '#7FD4F5',
+                     '#FFC4E1', '#FF7EC9', '#FFD1A6', '#FFB067', '#E0D0FF', '#C0A6FF',
+                     '#D9E3EC', '#B9C4D0', '#EFEFEF', '#FFFFFF', '#B7F7D8', '#FFB3B3'];
+let lastTextColor = '#B3232A', lastHlColor = '#FFE01A';
+
+const ttPalette = $('#tt-palette');
+let paletteKind = null;   // 'fore' | 'hilite' | null
+
+function hidePalette() { ttPalette.hidden = true; paletteKind = null; refreshSwatches(); }
+function refreshSwatches() {
+  $('#tt-color-dot').style.background = lastTextColor;
+  $('#tt-hl-dot').style.background = lastHlColor;
+  $('#tt-color').classList.toggle('on', paletteKind === 'fore');
+  $('#tt-highlight').classList.toggle('on', paletteKind === 'hilite');
+}
+
+function openPalette(kind) {
+  if (paletteKind === kind) { hidePalette(); positionTextToolbar(); return; }
+  paletteKind = kind;
+  ttPalette.innerHTML = '';
+  const none = document.createElement('button');
+  none.className = 'tt-chip none';
+  none.textContent = '✕';
+  none.title = kind === 'fore' ? 'Default colour' : 'No highlight';
+  none.onclick = () => applyColor(kind, null);
+  ttPalette.appendChild(none);
+  for (const c of (kind === 'fore' ? TEXT_COLORS : HL_COLORS)) {
+    const b = document.createElement('button');
+    b.className = 'tt-chip';
+    b.style.background = c;
+    b.title = c;
+    b.onclick = () => applyColor(kind, c);
+    ttPalette.appendChild(b);
+  }
+  ttPalette.hidden = false;
+  refreshSwatches();
+  positionTextToolbar();
+}
+
+function applyColor(kind, c) {
+  const s = peSession;
+  if (!s) return;
+  s.el.focus();
+  ensureSelection();
+  // colours only exist as CSS, so ask the browser for CSS output here and
+  // hand it back afterwards — the rest of the editing relies on <b>/<i> tags
+  try { document.execCommand('styleWithCSS', false, true); } catch {}
+  if (kind === 'fore') {
+    document.execCommand('foreColor', false, c || '#22252B');
+    if (c) lastTextColor = c;
+  } else {
+    const ok = document.execCommand('hiliteColor', false, c || 'transparent');
+    if (!ok) document.execCommand('backColor', false, c || 'transparent');
+    if (c) lastHlColor = c;
+  }
+  try { document.execCommand('styleWithCSS', false, false); } catch {}
+  // some engines still emit <font color>; normalise so the serialiser sees CSS
+  for (const f of [...s.el.querySelectorAll('font[color]')]) {
+    const sp = document.createElement('span');
+    sp.style.color = f.getAttribute('color');
+    sp.append(...f.childNodes);
+    f.replaceWith(sp);
+  }
+  if (!c) {  // clearing: drop the property rather than painting it on
+    for (const sp of [...s.el.querySelectorAll('span[style]')]) {
+      if (kind === 'fore') sp.style.color = '';
+      else sp.style.backgroundColor = '';
+      if (!sp.getAttribute('style')) sp.replaceWith(...sp.childNodes);
+    }
+    if (kind !== 'fore') for (const m of [...s.el.querySelectorAll('mark')]) m.replaceWith(...m.childNodes);
+  }
+  s.el.normalize();
+  syncPaperEdit();
+  refreshSwatches();
+  requestAnimationFrame(fitCanvas);
+}
+
+$('#tt-color').onclick = () => openPalette('fore');
+$('#tt-highlight').onclick = () => openPalette('hilite');
+
+// ---- alignment ------------------------------------------------------------
+function setAlign(v) {
+  const s = peSession;
+  if (!s) return;
+  s.el.style.textAlign = (v === 'left') ? '' : v;
+  s.el.focus();
+  syncPaperEdit();
+  positionTextToolbar();
+  refreshTtState();
+  requestAnimationFrame(fitCanvas);
+}
+$('#tt-align-left').onclick   = () => setAlign('left');
+$('#tt-align-center').onclick = () => setAlign('center');
+$('#tt-align-right').onclick  = () => setAlign('right');
+
+// ---- clear formatting -----------------------------------------------------
+$('#tt-clear').onclick = () => {
+  const s = peSession;
+  if (!s) return;
+  s.el.focus();
+  ensureSelection();
+  try { document.execCommand('removeFormat'); } catch {}
+  // removeFormat leaves size/colour spans behind in most engines
+  for (const el of [...s.el.querySelectorAll('span[style], font, mark')])
+    el.replaceWith(...el.childNodes);
+  s.el.style.textAlign = '';
+  s.el.normalize();
+  syncPaperEdit();
+  refreshTtState();
+  requestAnimationFrame(fitCanvas);
+};
+
+// ---- block type: paragraph / heading / list / quote ------------------------
+const ttBlock = $('#tt-block');
+
+function blockKindOf(el) {
+  const t = el.tagName;
+  if (/^H[1-6]$/.test(t)) return t.toLowerCase();
+  if (t === 'UL' || t === 'OL') return t.toLowerCase();
+  if (t === 'BLOCKQUOTE') return 'blockquote';
+  return 'p';
+}
+function syncBlockSelect() {
+  if (!peSession) return;
+  const k = blockKindOf(peSession.el);
+  ttBlock.value = [...ttBlock.options].some(o => o.value === k) ? k : 'p';
+}
+
+// Rebuild the block as a different element, carrying the inline HTML across.
+// The block keeps its position among #rendered's children, so the source-range
+// bookkeeping the session holds stays valid.
+function convertBlock(kind) {
+  const s = peSession;
+  if (!s || !note) return;
+  const old = s.el;
+  if (blockKindOf(old) === kind) return;
+  const wasList = old.tagName === 'UL' || old.tagName === 'OL';
+  const lines = wasList
+    ? [...old.children].filter(c => c.tagName === 'LI').map(li => li.innerHTML)
+    : old.innerHTML.split(/<br\s*\/?>/i);
+
+  let el;
+  if (kind === 'ul' || kind === 'ol') {
+    el = document.createElement(kind);
+    for (const line of (lines.length ? lines : [''])) {
+      const li = document.createElement('li');
+      li.innerHTML = line;
+      el.appendChild(li);
+    }
+  } else {
+    el = document.createElement(kind);
+    el.innerHTML = wasList ? lines.join('<br>') : old.innerHTML;
+  }
+  el.className = old.className;
+  if (old.style.textAlign) el.style.textAlign = old.style.textAlign;
+
+  old.removeEventListener('input', onPeInput);
+  old.removeAttribute('contenteditable');
+  old.replaceWith(el);
+  s.el = el;
+  beginPeSession(el, null);
+  focusEnd(el);
+  syncPaperEdit();
+  requestAnimationFrame(fitCanvas);
+}
+ttBlock.addEventListener('change', () => convertBlock(ttBlock.value));
+
+// ---- toolbar state --------------------------------------------------------
 function refreshTtState() {
   if (!peSession) return;
-  try {
-    $('#tt-bold').classList.toggle('on', document.queryCommandState('bold'));
-    $('#tt-italic').classList.toggle('on', document.queryCommandState('italic'));
-  } catch {}
+  const st = (c) => { try { return document.queryCommandState(c); } catch { return false; } };
+  $('#tt-bold').classList.toggle('on', st('bold'));
+  $('#tt-italic').classList.toggle('on', st('italic'));
+  $('#tt-underline').classList.toggle('on', st('underline'));
+  $('#tt-strike').classList.toggle('on', st('strikeThrough'));
+  const a = blockAlign(peSession.el) || 'left';
+  $('#tt-align-left').classList.toggle('on', a === 'left');
+  $('#tt-align-center').classList.toggle('on', a === 'center');
+  $('#tt-align-right').classList.toggle('on', a === 'right');
+  syncBlockSelect();
+  refreshSwatches();
 }
 document.addEventListener('selectionchange', () => { if (peSession) refreshTtState(); });
 
 // ───────────────────────────── notebooks ─────────────────────────────────
 function renderNotebooks() {
   notebookList.innerHTML = '';
+
+  // "All notes" is also the home for anything left unfiled by a deleted notebook
+  const all = document.createElement('div');
+  all.className = 'notebook all' + (currentNotebookId ? '' : ' on');
+  all.title = 'Every note, in every notebook';
+  all.innerHTML = `<span class="nb-name">All notes</span>` +
+                  `<span class="count">${notesMeta.length}</span>`;
+  all.onclick = () => { currentNotebookId = null; renderNotebooks(); renderNotes(); };
+  notebookList.appendChild(all);
+
   for (const nb of notebooks) {
     const count = notesMeta.filter(n => n.notebookId === nb.id).length;
     const el = document.createElement('div');
     el.className = 'notebook' + (nb.id === currentNotebookId ? ' on' : '');
-    el.innerHTML = `<span>${escapeHtml(nb.title)}</span><span class="count">${count}</span>`;
+    el.innerHTML = `<span class="nb-name">${escapeHtml(nb.title)}</span>` +
+                   `<span class="count">${count}</span>` +
+                   `<button class="nb-del" title="Delete this notebook">✕</button>`;
     el.title = nb.title;
-    el.onclick = () => { currentNotebookId = nb.id; renderNotebooks(); renderNotes(); };
+    el.onclick = (e) => {
+      if (e.target.closest('.nb-del')) { openNotebookDelete(nb); return; }
+      currentNotebookId = nb.id;
+      renderNotebooks();
+      renderNotes();
+    };
     notebookList.appendChild(el);
   }
 }
@@ -714,6 +1059,65 @@ $('#add-notebook').onclick = async () => {
   notebooks.push({ id: 'nb-' + Date.now(), title: title.trim(), created: Date.now() });
   await api('/notebooks', { method: 'PUT', body: JSON.stringify(notebooks) });
   renderNotebooks();
+};
+
+// ── deleting a notebook ──────────────────────────────────────────────────
+// A notebook is just a label on its notes, so deleting one asks the only
+// question that actually matters: do the notes go with it, or do they stay
+// (unfiled, still reachable under "All notes")?
+const nbdelOverlay = $('#nbdel-overlay');
+let nbPendingDelete = null;
+
+function openNotebookDelete(nb) {
+  nbPendingDelete = nb;
+  const count = notesMeta.filter(n => n.notebookId === nb.id).length;
+  $('#nbdel-text').innerHTML = count
+    ? `<b>${escapeHtml(nb.title)}</b> holds ${count} note${count === 1 ? '' : 's'}. ` +
+      `Keep them and they move to <b>All notes</b>; delete them and they go from every device.`
+    : `<b>${escapeHtml(nb.title)}</b> is empty — deleting it removes nothing else.`;
+  $('#nbdel-all').textContent = count ? 'Delete notes too' : 'Delete notebook';
+  $('#nbdel-keep').hidden = !count;
+  nbdelOverlay.hidden = false;
+}
+function closeNotebookDelete() { nbdelOverlay.hidden = true; nbPendingDelete = null; }
+$('#nbdel-x').onclick = closeNotebookDelete;
+$('#nbdel-cancel').onclick = closeNotebookDelete;
+nbdelOverlay.addEventListener('click', (e) => { if (e.target === nbdelOverlay) closeNotebookDelete(); });
+
+async function deleteNotebook(nb, alsoNotes) {
+  const ids = notesMeta.filter(n => n.notebookId === nb.id).map(n => n.id);
+  notebooks = notebooks.filter(b => b.id !== nb.id);
+  await api('/notebooks', { method: 'PUT', body: JSON.stringify(notebooks) });
+
+  if (alsoNotes) {
+    if (note && ids.includes(note.id)) { dropPaperEdit(); note = null; }
+    for (const id of ids) await api('/notes/' + id, { method: 'DELETE' }).catch(() => {});
+    notesMeta = notesMeta.filter(n => !ids.includes(n.id));
+    if (!note) showNote(null);
+  } else {
+    for (const id of ids) {
+      const n = (note && note.id === id) ? note : await api('/notes/' + id).catch(() => null);
+      if (!n) continue;
+      n.notebookId = null;
+      n.updated = Date.now();
+      await api('/notes/' + id, { method: 'PUT', body: JSON.stringify(n) }).catch(() => {});
+      const m = notesMeta.find(x => x.id === id);
+      if (m) m.notebookId = null;
+    }
+  }
+  if (currentNotebookId === nb.id) currentNotebookId = null;
+  renderNotes();       // also re-renders the rail
+}
+
+$('#nbdel-keep').onclick = async () => {
+  const nb = nbPendingDelete;
+  closeNotebookDelete();
+  if (nb) await deleteNotebook(nb, false);
+};
+$('#nbdel-all').onclick = async () => {
+  const nb = nbPendingDelete;
+  closeNotebookDelete();
+  if (nb) await deleteNotebook(nb, true);
 };
 
 // ───────────────────────────── notes list ────────────────────────────────
@@ -754,8 +1158,8 @@ async function createNote(pageMode) {
   nnOverlay.hidden = true;
   const id = 'n-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
   const nb = currentNotebookId || (notebooks[0] && notebooks[0].id);
-  const fresh = { id, notebookId: nb, title: '', body: '', strokes: [], codeTiles: {},
-                  pageMode, created: Date.now(), updated: Date.now() };
+  const fresh = { id, notebookId: nb, title: '', body: '', strokes: [], images: [],
+                  codeTiles: {}, pageMode, created: Date.now(), updated: Date.now() };
   await api('/notes/' + id, { method: 'PUT', body: JSON.stringify(fresh) });
   upsertMeta({ ...fresh, preview: '' });
   note = fresh;
@@ -766,14 +1170,9 @@ async function createNote(pageMode) {
 $('#choose-a4').onclick = () => createNote('a4');
 $('#choose-infinite').onclick = () => createNote('infinite');
 
-async function openNote(id) {
-  closeDrawer();
-  if (note && note.id === id) return;
-  commitPaperEdit();
-  flushSave();
-  const n = await api('/notes/' + id);
-  if (!n) return;
+function normalizeNote(n) {
   n.strokes = Array.isArray(n.strokes) ? n.strokes : [];
+  n.images = Array.isArray(n.images) ? n.images : [];
   n.codeTiles = n.codeTiles && typeof n.codeTiles === 'object' ? n.codeTiles : {};
   if (n.pageMode !== 'infinite') n.pageMode = 'a4';
   if (n.codeSizes && typeof n.codeSizes === 'object') {   // migrate old format
@@ -781,6 +1180,17 @@ async function openNote(id) {
       n.codeTiles[ci] = { font: f, ...(n.codeTiles[ci] || {}) };
     delete n.codeSizes;
   }
+  return n;
+}
+
+async function openNote(id) {
+  closeDrawer();
+  if (note && note.id === id) return;
+  commitPaperEdit();
+  flushSave();
+  const n = await api('/notes/' + id);
+  if (!n) return;
+  normalizeNote(n);
   note = n;
   undoStack = []; redoStack = []; liveRemote.clear();
   showNote(n);
@@ -802,10 +1212,12 @@ $('#btn-pagemode').onclick = () => {
 function showNote(n) {
   dropPaperEdit(); // any leftover session belongs to a previous note
   setInkMode(false);
+  deselectImage();
   titleEl.value = n ? (n.title || '') : '';
   editor.value = n ? (n.body || '') : '';
   pageModeLabel();
   renderMarkdown();
+  renderImages();
   renderNotes();
   redraw();
 }
@@ -1071,7 +1483,7 @@ codeText.addEventListener('keydown', (e) => {
 
 // ───────────────────────────── ink engine ────────────────────────────────
 function setInkMode(on) {
-  if (on) commitPaperEdit();
+  if (on) { commitPaperEdit(); deselectImage(); }
   inkMode = on && !!note;
   paper.classList.toggle('inking', inkMode);
   penTray.hidden = !inkMode;
@@ -1310,7 +1722,7 @@ function fitCanvas() {
   paper.style.setProperty('--inv-zoom', 1 / paperZoom);
   const pageH = PAGE_H_LOGICAL; // a page is a page — identical on every device
   paper.style.setProperty('--page-h', pageH + 'px');
-  const contentH = Math.max(rendered.scrollHeight + 48, maxInkY() + 80);
+  const contentH = Math.max(rendered.scrollHeight + 48, maxInkY() + 80, maxImageY() + 40);
   let h;
   if (note && note.pageMode === 'infinite') {
     // always leave a stretch of blank paper past the text for handwriting
@@ -1324,6 +1736,8 @@ function fitCanvas() {
     updatePageMarks(pages, pageH);
   }
   if (paper.style.height !== h + 'px') paper.style.height = h + 'px';
+  if (peSession) positionTextToolbar();
+  if (selectedImgId) positionImgToolbar();
   // a transform doesn't resize the layout box, so give the scroller the
   // on-screen size of the scaled page
   paperFit.style.height = Math.round(h * paperZoom) + 'px';
@@ -1366,10 +1780,14 @@ function insertBlankPage(pageIndex) {
   for (const s of note.strokes || [])
     if (s.points.length && Math.min(...s.points.map(p => p.y)) >= boundary)
       for (const p of s.points) p.y += PAGE_H_LOGICAL;
+  // …and the pictures, so a page insert doesn't tear the layout apart
+  for (const im of note.images || [])
+    if (im.y >= boundary) im.y += PAGE_H_LOGICAL;
 
   note.updated = Date.now();
   editor.value = note.body;
   renderMarkdown();
+  renderImages();
   flushSave();
   socket.emit('note:reload', { id: note.id });
 }
@@ -1718,6 +2136,459 @@ function inkRedo() {
 $('#ink-undo').onclick = inkUndo;
 $('#ink-redo').onclick = inkRedo;
 
+
+// ───────────────────────────── pictures ──────────────────────────────────
+// Paste (Ctrl+V), drop, or pick a picture and it lands on the page as a free
+// floating object you can drag and resize.
+//
+// The one rule that keeps zooming honest: a picture is stored in PAGE
+// coordinates — the same 820-wide space as the text, the code tiles, the page
+// breaks and every ink stroke. The layer holding them is a plain child of
+// .paper, so the page's single CSS scale carries the pictures along with
+// everything else. Zoom out on a phone, drag the pane divider, rotate the
+// tablet: the picture keeps the same size and position *relative to the
+// words*, because nothing in this file ever converts a picture into screen
+// pixels and stores the result. Screen pixels only appear while a drag is in
+// flight, and they are divided straight back out by the live page scale.
+
+const MAX_IMG_DIM = 1600;        // re-encode anything larger; keeps notes small
+const IMG_SIDE_MARGIN = 46;      // matches .rendered's side padding
+let selectedImgId = null;
+let imgClip = null;              // our own clipboard, for when the system one is closed
+let imgDrag = null;
+let nudgeTimer = null;           // coalesces arrow-key nudges into one save
+
+// screen px per page px, read live so it is right at any zoom or window size
+function pageScale() {
+  const r = paper.getBoundingClientRect();
+  return r.width ? r.width / PAPER_W : (paperZoom || 1);
+}
+function noteImages() {
+  return (note && Array.isArray(note.images)) ? note.images : [];
+}
+function findImage(id) { return noteImages().find(i => i.id === id); }
+function maxImageY() {
+  let m = 0;
+  for (const im of noteImages()) m = Math.max(m, im.y + im.h);
+  return m;
+}
+// topmost picture covering a page-space point ('behind' ones only, if asked)
+function imageAt(x, y, behindOnly) {
+  const list = noteImages().filter(im => !behindOnly || im.behind);
+  for (let i = list.length - 1; i >= 0; i--) {
+    const im = list[i];
+    if (x >= im.x && x <= im.x + im.w && y >= im.y && y <= im.y + im.h) return im;
+  }
+  return null;
+}
+
+// ---- rendering -----------------------------------------------------------
+// Reconciled rather than rebuilt, so dragging never re-decodes the bitmap.
+function renderImages() {
+  if (!imgLayer) return;
+  const seen = new Set();
+  for (const im of noteImages()) {
+    const domId = 'pimg-' + im.id;
+    let box = document.getElementById(domId);
+    if (!box) {
+      box = document.createElement('div');
+      box.id = domId;
+      box.className = 'pimg';
+      box.dataset.id = im.id;
+      const img = document.createElement('img');
+      img.alt = '';
+      img.draggable = false;
+      box.appendChild(img);
+      for (const g of ['nw', 'ne', 'sw', 'se']) {
+        const h = document.createElement('div');
+        h.className = 'pimg-h ' + g;
+        h.dataset.grip = g;
+        box.appendChild(h);
+      }
+    }
+    const target = im.behind ? imgBack : imgLayer;
+    if (box.parentElement !== target) target.appendChild(box);
+    const img = box.querySelector('img');
+    if (img.getAttribute('src') !== im.src) img.setAttribute('src', im.src);
+    box.style.left = im.x + 'px';
+    box.style.top = im.y + 'px';
+    box.style.width = im.w + 'px';
+    box.style.height = im.h + 'px';
+    box.classList.toggle('on', im.id === selectedImgId);
+    box.classList.toggle('behind', !!im.behind);
+    seen.add(domId);
+  }
+  for (const layer of [imgLayer, imgBack])
+    for (const el of [...layer.children]) if (!seen.has(el.id)) el.remove();
+  positionImgToolbar();
+}
+
+function positionImgToolbar() {
+  const im = findImage(selectedImgId);
+  if (!im) { imgTb.hidden = true; return; }
+  imgTb.hidden = false;
+  $('#im-front').textContent = im.behind ? 'In front' : 'Behind';
+  $('#im-front').classList.toggle('on', !!im.behind);
+  fitFloatingBar(imgTb);
+  // the bar is counter-scaled to stay legible, so its page footprint grows as
+  // the page shrinks — measure it and keep it on the paper
+  const iz = 1 / (paperZoom || 1);
+  const w = (imgTb.offsetWidth || 340) * iz;
+  const h = (imgTb.offsetHeight || 34) * iz;
+  let top = im.y - (h + 8);
+  if (top < 4) top = Math.min(im.y + im.h + 8, Math.max(4, paper.clientHeight - h - 4));
+  imgTb.style.top = Math.max(4, top) + 'px';
+  imgTb.style.left = Math.min(Math.max(6, im.x), Math.max(6, PAPER_W - w - 6)) + 'px';
+}
+
+function selectImage(id) {
+  commitPaperEdit();
+  selectedImgId = id;
+  renderImages();
+  requestAnimationFrame(positionImgToolbar);
+}
+function deselectImage() {
+  if (!selectedImgId) { imgTb.hidden = true; return; }
+  selectedImgId = null;
+  renderImages();
+}
+
+// ---- persistence ---------------------------------------------------------
+// Pictures ride with the note itself, so they are saved with a full PUT and
+// the other devices are told to refetch — the same route a blank-page insert
+// takes. Nothing image-shaped is ever pushed down the per-keystroke channel.
+async function pushImages() {
+  if (!note) return;
+  const id = note.id;
+  note.updated = Date.now();
+  upsertMeta({ id, notebookId: note.notebookId, title: note.title,
+               body: note.body, updated: note.updated, created: note.created });
+  renderNotes();
+  clearTimeout(saveTimer); saveTimer = null;
+  try { await api('/notes/' + id, { method: 'PUT', body: JSON.stringify(note) }); } catch {}
+  socket.emit('note:reload', { id });
+}
+
+// ---- getting a picture in ------------------------------------------------
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = rej;
+    img.src = src;
+  });
+}
+function readAsDataURL(file) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result);
+    fr.onerror = rej;
+    fr.readAsDataURL(file);
+  });
+}
+
+// Re-encode oversized bitmaps: a phone photo is 4000px wide and 6 MB, which
+// would bloat every save and every sync of the note for no visible gain at
+// 820 page px. Animated GIFs are left alone (a canvas would freeze them).
+async function prepareImage(file) {
+  const raw = await readAsDataURL(file);
+  const img = await loadImage(raw);
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const k = Math.min(1, MAX_IMG_DIM / Math.max(w, h));
+  if (k === 1 || file.type === 'image/gif') return { src: raw, w, h };
+  const cw = Math.max(1, Math.round(w * k)), chh = Math.max(1, Math.round(h * k));
+  const c = document.createElement('canvas');
+  c.width = cw; c.height = chh;
+  const cx = c.getContext('2d');
+  cx.drawImage(img, 0, 0, cw, chh);
+  const keepAlpha = /png|webp|svg/.test(file.type);
+  const out = c.toDataURL(keepAlpha ? 'image/png' : 'image/jpeg', 0.85);
+  return { src: out.length < raw.length ? out : raw, w: cw, h: chh };
+}
+
+// where a fresh picture lands: centred on the page, level with what you are
+// looking at — all worked out in page coordinates
+function defaultSpot(w, h) {
+  const k = pageScale();
+  const pr = paper.getBoundingClientRect(), sr = paperScroll.getBoundingClientRect();
+  const viewY = ((sr.top + Math.min(sr.height * 0.35, 260)) - pr.top) / k;
+  return {
+    x: Math.round((PAPER_W - w) / 2),
+    y: Math.round(Math.max(12, viewY))
+  };
+}
+
+function placeImage(src, natW, natH, spot, nudge) {
+  if (!note) return null;
+  const maxW = PAPER_W - IMG_SIDE_MARGIN * 2;
+  const k = Math.min(1, maxW / natW, 900 / natH);
+  const w = Math.max(24, Math.round(natW * k));
+  const h = Math.max(24, Math.round(natH * k));
+  const at = spot || defaultSpot(w, h);
+  const im = {
+    id: 'i-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+    src,
+    x: Math.round(Math.min(Math.max(at.x + (nudge ? 22 : 0), 0), Math.max(0, PAPER_W - w))),
+    y: Math.round(Math.max(8, at.y + (nudge ? 22 : 0))),
+    w, h, behind: false
+  };
+  note.images = noteImages().concat([im]);
+  renderImages();
+  selectImage(im.id);
+  fitCanvas();
+  pushImages();
+  return im;
+}
+
+async function addImageFromFile(file, spot) {
+  if (!note || !file || !file.type || !file.type.startsWith('image/')) return;
+  try {
+    const { src, w, h } = await prepareImage(file);
+    if (src.length > 8e6) { alert('That picture is too large to store in a note.'); return; }
+    placeImage(src, w, h, spot);
+  } catch { alert('That picture could not be read.'); }
+}
+
+// the point under a pointer event, in page coordinates
+function eventPageXY(e) {
+  const pr = paper.getBoundingClientRect();
+  const k = pr.width ? PAPER_W / pr.width : 1;
+  return { x: (e.clientX - pr.left) * k, y: (e.clientY - pr.top) * k };
+}
+
+// ---- drag + resize -------------------------------------------------------
+// Screen deltas are divided by the live page scale before they touch the
+// stored geometry, so a drag moves the picture by the same number of PAGE
+// pixels whether the page is drawn at 100% or squeezed onto a phone.
+function imgPointerDown(e) {
+  if (inkMode || !note || e.button > 0) return;
+  const box = e.target.closest('.pimg');
+  if (!box) return;
+  const im = findImage(box.dataset.id);
+  if (!im) return;
+  selectImage(im.id);
+  imgDrag = {
+    im, box,
+    grip: e.target.dataset ? e.target.dataset.grip : null,
+    k: pageScale(),
+    sx: e.clientX, sy: e.clientY,
+    x: im.x, y: im.y, w: im.w, h: im.h,
+    ar: im.w / Math.max(1, im.h),
+    moved: false
+  };
+  box.classList.add('dragging');
+  try { box.setPointerCapture(e.pointerId); } catch {}
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+function imgPointerMove(e) {
+  const d = imgDrag;
+  if (!d) return;
+  const dx = (e.clientX - d.sx) / d.k, dy = (e.clientY - d.sy) / d.k;
+  if (Math.abs(dx) > 1 || Math.abs(dy) > 1) d.moved = true;
+  const pageH = paper.clientHeight || (d.y + d.h + 200);
+  if (!d.grip) {
+    // let a picture hang half off the edge, but never wander out of reach
+    d.im.x = Math.round(Math.min(Math.max(d.x + dx, -d.w / 2), PAPER_W - d.w / 2));
+    d.im.y = Math.round(Math.min(Math.max(d.y + dy, 0), Math.max(0, pageH - 24)));
+  } else {
+    const west = d.grip[1] === 'w', north = d.grip[0] === 'n';
+    let nw = Math.min(Math.max(24, d.w + (west ? -dx : dx)), PAPER_W * 2);
+    let nh = Math.max(18, Math.round(nw / d.ar));
+    nw = Math.round(nw);
+    d.im.w = nw; d.im.h = nh;
+    d.im.x = Math.round(west ? d.x + (d.w - nw) : d.x);
+    d.im.y = Math.round(north ? Math.max(0, d.y + (d.h - nh)) : d.y);
+  }
+  const b = d.box;
+  b.style.left = d.im.x + 'px'; b.style.top = d.im.y + 'px';
+  b.style.width = d.im.w + 'px'; b.style.height = d.im.h + 'px';
+  positionImgToolbar();
+}
+
+function imgPointerUp() {
+  const d = imgDrag;
+  if (!d) return;
+  imgDrag = null;
+  d.box.classList.remove('dragging');
+  if (d.moved) { fitCanvas(); pushImages(); }
+}
+
+for (const layer of [imgLayer, imgBack]) {
+  layer.addEventListener('pointerdown', imgPointerDown);
+  layer.addEventListener('dblclick', (e) => {
+    const box = e.target.closest('.pimg');
+    if (box) e.stopPropagation();   // don't fall through to "edit the text here"
+  });
+}
+window.addEventListener('pointermove', imgPointerMove);
+window.addEventListener('pointerup', imgPointerUp);
+window.addEventListener('pointercancel', imgPointerUp);
+
+// clicking anywhere that isn't a picture or its bar puts the selection away
+document.addEventListener('pointerdown', (e) => {
+  if (!selectedImgId) return;
+  if (e.target.closest('.pimg') || e.target.closest('#img-toolbar')) return;
+  deselectImage();
+});
+
+// ---- the selected picture's bar ------------------------------------------
+function scaleImage(f) {
+  const im = findImage(selectedImgId);
+  if (!im) return;
+  const w = Math.min(Math.max(24, Math.round(im.w * f)), PAPER_W * 2);
+  im.h = Math.max(18, Math.round(w * (im.h / Math.max(1, im.w))));
+  im.w = w;
+  renderImages();
+  fitCanvas();
+  pushImages();
+}
+$('#im-bigger').onclick = () => scaleImage(1.1);
+$('#im-smaller').onclick = () => scaleImage(1 / 1.1);
+$('#im-fit').onclick = () => {
+  const im = findImage(selectedImgId);
+  if (!im) return;
+  const w = PAPER_W - IMG_SIDE_MARGIN * 2;
+  im.h = Math.max(18, Math.round(w * (im.h / Math.max(1, im.w))));
+  im.w = w;
+  im.x = IMG_SIDE_MARGIN;
+  renderImages();
+  fitCanvas();
+  pushImages();
+};
+$('#im-front').onclick = () => {
+  const im = findImage(selectedImgId);
+  if (!im) return;
+  im.behind = !im.behind;
+  renderImages();
+  pushImages();
+};
+$('#im-delete').onclick = () => deleteSelectedImage();
+$('#im-dupe').onclick = () => {
+  const im = findImage(selectedImgId);
+  if (im) placeImage(im.src, im.w, im.h, { x: im.x, y: im.y }, true);
+};
+$('#im-copy').onclick = () => copySelectedImage();
+
+function deleteSelectedImage() {
+  const im = findImage(selectedImgId);
+  if (!im || !note) return;
+  note.images = noteImages().filter(i => i.id !== im.id);
+  selectedImgId = null;
+  renderImages();
+  fitCanvas();
+  pushImages();
+}
+
+// ---- copy -----------------------------------------------------------------
+async function imgToPngBlob(src) {
+  const img = await loadImage(src);
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth; c.height = img.naturalHeight;
+  c.getContext('2d').drawImage(img, 0, 0);
+  return new Promise(r => c.toBlob(r, 'image/png'));
+}
+
+// Two clipboards at once: the system one (so the picture can be pasted into
+// any other app) and our own (so Ctrl+V still works here when the browser
+// refuses clipboard access, which it does over plain http).
+async function copySelectedImage() {
+  const im = findImage(selectedImgId);
+  if (!im) return false;
+  imgClip = { src: im.src, w: im.w, h: im.h, x: im.x, y: im.y };
+  try {
+    if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
+      const blob = await imgToPngBlob(im.src);
+      if (blob) await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    }
+  } catch {}
+  const b = $('#im-copy');
+  b.textContent = 'Copied ✓';
+  setTimeout(() => { b.textContent = 'Copy'; }, 1100);
+  return true;
+}
+
+// ---- paste ----------------------------------------------------------------
+document.addEventListener('paste', async (e) => {
+  if (!note) return;
+  if (!overlay.hidden || !nnOverlay.hidden || !nbdelOverlay.hidden) return; // a dialog owns it
+  const dt = e.clipboardData;
+  const items = dt ? [...(dt.items || [])] : [];
+  const pic = items.find(it => it.kind === 'file' && (it.type || '').startsWith('image/'));
+  if (pic) {
+    const f = pic.getAsFile();
+    if (f) { e.preventDefault(); await addImageFromFile(f); }
+    return;
+  }
+  // Nothing pictorial on the system clipboard. Fall back to our own copy —
+  // but only when there is no text either, so an ordinary text paste always
+  // wins over a picture copied ten minutes ago.
+  if (imgClip && !items.some(it => it.kind === 'string')) {
+    e.preventDefault();
+    placeImage(imgClip.src, imgClip.w, imgClip.h, { x: imgClip.x, y: imgClip.y }, true);
+  }
+});
+
+// ---- drop + file picker ---------------------------------------------------
+const dtHasImage = (e) => !!(e.dataTransfer && [...(e.dataTransfer.items || [])]
+  .some(it => it.kind === 'file' && (it.type || '').startsWith('image/')));
+
+paperScroll.addEventListener('dragover', (e) => {
+  if (note && !inkMode && dtHasImage(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+});
+paperScroll.addEventListener('drop', async (e) => {
+  if (!note || inkMode) return;
+  const files = [...((e.dataTransfer && e.dataTransfer.files) || [])]
+    .filter(f => (f.type || '').startsWith('image/'));
+  if (!files.length) return;
+  e.preventDefault();
+  const at = eventPageXY(e);
+  for (const f of files) await addImageFromFile(f, { x: Math.max(0, at.x - 120), y: Math.max(8, at.y - 80) });
+});
+
+const imgFileInput = $('#image-file');
+$('#btn-image').onclick = () => { if (note) imgFileInput.click(); };
+imgFileInput.addEventListener('change', async () => {
+  for (const f of [...imgFileInput.files]) await addImageFromFile(f);
+  imgFileInput.value = '';
+});
+
+// ---- keyboard -------------------------------------------------------------
+// Only when a picture is selected and you are not typing somewhere.
+function typingSomewhere() {
+  const a = document.activeElement;
+  if (!a) return false;
+  return a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' ||
+         a.isContentEditable;
+}
+document.addEventListener('keydown', (e) => {
+  if (!selectedImgId || typingSomewhere()) return;
+  const mod = e.ctrlKey || e.metaKey;
+  if (e.key === 'Escape') { deselectImage(); return; }
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelectedImage(); return; }
+  if (mod && e.key.toLowerCase() === 'c') { e.preventDefault(); copySelectedImage(); return; }
+  if (mod && e.key.toLowerCase() === 'd') {
+    e.preventDefault();
+    const im = findImage(selectedImgId);
+    if (im) placeImage(im.src, im.w, im.h, { x: im.x, y: im.y }, true);
+    return;
+  }
+  if (e.key.startsWith('Arrow')) {
+    const im = findImage(selectedImgId);
+    if (!im) return;
+    e.preventDefault();
+    const step = e.shiftKey ? 20 : 2;
+    if (e.key === 'ArrowLeft')  im.x -= step;
+    if (e.key === 'ArrowRight') im.x += step;
+    if (e.key === 'ArrowUp')    im.y = Math.max(0, im.y - step);
+    if (e.key === 'ArrowDown')  im.y += step;
+    renderImages();
+    clearTimeout(nudgeTimer);
+    nudgeTimer = setTimeout(() => { fitCanvas(); pushImages(); }, 400);
+  }
+});
+
 // ─────────── resizable partitions: rail | notes | editor/paper ────────────
 // Drag the thin handle on each divider; widths persist in this browser.
 const LAYOUT_KEY = 'inkwell-layout';
@@ -1775,8 +2646,14 @@ document.addEventListener('keydown', (e) => {
   if (mod && e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); openCodeDialog(); }
   if (inkMode && mod && e.key.toLowerCase() === 'z') { e.preventDefault(); inkUndo(); }
   if (inkMode && mod && e.key.toLowerCase() === 'y') { e.preventDefault(); inkRedo(); }
+  if (mod && !e.shiftKey && e.key.toLowerCase() === 'k' && peSession) {
+    e.preventDefault(); $('#tt-link').onclick(); return;
+  }
+  if (e.key === 'Escape' && !ttPalette.hidden) { hidePalette(); positionTextToolbar(); return; }
   if (e.key === 'Escape' && peSession) { commitPaperEdit(); return; }
   if (e.key === 'Escape' && !overlay.hidden) closeCodeDialog();
+  if (e.key === 'Escape' && !nbdelOverlay.hidden) closeNotebookDelete();
+  if (e.key === 'Escape' && !nnOverlay.hidden) nnOverlay.hidden = true;
 });
 
 // ───────────────────────────── boot ──────────────────────────────────────
@@ -1800,6 +2677,17 @@ the line. Draw on the tablet and the stroke appears on the laptop *while you dra
 - ↶ / ↷ undo and redo ink
 - ☝ palm rejection ignores finger touches
 - **Export** downloads the note as Markdown
+
+## Pictures
+Copy a picture anywhere and press \`Ctrl+V\` on this page — or drag one in, or press
+**🖼 Image**. Drag it around, pull a corner to resize, and use **Behind** to slide it
+under the words so you can write on top of it. Pictures live in page coordinates, so
+they keep their place next to the text at every zoom level and on every device.
+
+## Editing on the page
+Click any paragraph on the paper to edit it right there. The floating bar does headings,
+lists, quotes, **bold**, *italic*, underline, strikethrough, \`code\`, links, text colour,
+highlighting, size and alignment.
 `;
 
 (async function boot() {
@@ -1809,7 +2697,8 @@ the line. Draw on the tablet and the stroke appears on the laptop *while you dra
   if (notesMeta.length === 0) {
     const id = 'n-welcome-' + Date.now();
     const w = { id, notebookId: notebooks[0] && notebooks[0].id, title: 'Welcome to Inkwell',
-                body: WELCOME, strokes: [], created: Date.now(), updated: Date.now() };
+                body: WELCOME, strokes: [], images: [], codeTiles: {}, pageMode: 'a4',
+                created: Date.now(), updated: Date.now() };
     await api('/notes/' + id, { method: 'PUT', body: JSON.stringify(w) });
     notesMeta = [{ ...w, preview: w.body.slice(0, 120), hasInk: false }];
   }
