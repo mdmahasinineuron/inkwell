@@ -28,6 +28,9 @@ const notebookList = $('#notebook-list'), noteList = $('#note-list');
 const titleEl = $('#title'), editor = $('#editor'), rendered = $('#rendered');
 const paper = $('#paper'), paperFit = $('#paper-fit'), paperScroll = $('#paper-scroll');
 const canvas = $('#ink-canvas'), ctx = canvas.getContext('2d');
+// the highlighter draws on its own plane below the text (see #hl-canvas in the
+// CSS); it takes no pointer input — every gesture still lands on #ink-canvas
+const hlCanvas = $('#hl-canvas'), hctx = hlCanvas.getContext('2d');
 const penTray = $('#pen-tray'), pressureOut = $('#pressure-readout');
 const imgLayer = $('#img-layer'), imgBack = $('#img-layer-back'), imgTb = $('#img-toolbar');
 const presenceEl = $('#presence');
@@ -102,6 +105,7 @@ socket.on('note:reload', async (msg) => {
     if (document.activeElement !== titleEl) titleEl.value = n.title || '';
     if (document.activeElement !== editor) editor.value = n.body || '';
     pageModeLabel();
+    applyPaper(n);
     renderMarkdown();
     renderImages();
     redraw();
@@ -1154,12 +1158,24 @@ $('#add-note').onclick = () => { nnOverlay.hidden = false; };
 $('#newnote-cancel').onclick = () => { nnOverlay.hidden = true; };
 nnOverlay.addEventListener('click', (e) => { if (e.target === nnOverlay) nnOverlay.hidden = true; });
 
+// paper tints, light enough that the page's dark text and the highlighter
+// underneath it both stay readable on every one of them
+const PAPERS = [
+  { c: '#F4EFE4', n: 'Cream' },      { c: '#FFFFFF', n: 'White' },
+  { c: '#FBF7EF', n: 'Ivory' },      { c: '#F6F1E3', n: 'Sand' },
+  { c: '#F2EFE9', n: 'Warm grey' },  { c: '#EEF2F7', n: 'Pale blue' },
+  { c: '#EDF5EE', n: 'Mint' },       { c: '#FAEFF1', n: 'Blush' },
+  { c: '#FBF6DF', n: 'Pale yellow'}, { c: '#F1EEF8', n: 'Lavender' }
+];
+const PAPER_DEFAULT = PAPERS[0].c;
+
 async function createNote(pageMode) {
   nnOverlay.hidden = true;
   const id = 'n-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
   const nb = currentNotebookId || (notebooks[0] && notebooks[0].id);
   const fresh = { id, notebookId: nb, title: '', body: '', strokes: [], images: [],
-                  codeTiles: {}, pageMode, created: Date.now(), updated: Date.now() };
+                  codeTiles: {}, pageMode, pageColor: PAPER_DEFAULT, pagePattern: 'plain',
+                  created: Date.now(), updated: Date.now() };
   await api('/notes/' + id, { method: 'PUT', body: JSON.stringify(fresh) });
   upsertMeta({ ...fresh, preview: '' });
   note = fresh;
@@ -1175,6 +1191,9 @@ function normalizeNote(n) {
   n.images = Array.isArray(n.images) ? n.images : [];
   n.codeTiles = n.codeTiles && typeof n.codeTiles === 'object' ? n.codeTiles : {};
   if (n.pageMode !== 'infinite') n.pageMode = 'a4';
+  // notes written before the paper picker existed are the original cream, plain
+  if (!/^#[0-9a-f]{6}$/i.test(n.pageColor || '')) n.pageColor = PAPER_DEFAULT;
+  if (n.pagePattern !== 'dots') n.pagePattern = 'plain';
   if (n.codeSizes && typeof n.codeSizes === 'object') {   // migrate old format
     for (const [ci, f] of Object.entries(n.codeSizes))
       n.codeTiles[ci] = { font: f, ...(n.codeTiles[ci] || {}) };
@@ -1209,13 +1228,83 @@ $('#btn-pagemode').onclick = () => {
   socket.emit('note:reload', { id: note.id });
 };
 
+// ───────── page colour + paper ─────────
+// A per-note property, changeable at any moment — mid-sentence, mid-stroke.
+// Repointing --paper on the page element is all it takes: the "＋ blank page"
+// chip and the "A4 · page 2" labels already read var(--paper), so they follow.
+const paperPop = $('#paper-pop');
+
+function applyPaper(n) {
+  paper.style.setProperty('--paper', (n && n.pageColor) || PAPER_DEFAULT);
+  paper.classList.toggle('dots', !!n && n.pagePattern === 'dots');
+}
+
+// one commit path for both halves of the picker, mirroring #btn-pagemode:
+// paint it now, save it, and tell the other devices to refetch (the note:saved
+// broadcast only carries a hand-picked set of fields, so it would drop these)
+function setPaper(patch) {
+  if (!note) return;
+  Object.assign(note, patch);
+  note.updated = Date.now();
+  applyPaper(note);
+  flushSave();
+  socket.emit('note:reload', { id: note.id });
+  renderPaperPop();
+}
+
+function renderPaperPop() {
+  if (!note) return;
+  const grid = $('#paper-grid');
+  grid.innerHTML = '';
+  for (const p of PAPERS) {
+    const b = document.createElement('button');
+    b.className = 'ink-swatch' + (note.pageColor.toLowerCase() === p.c.toLowerCase() ? ' on' : '');
+    b.style.setProperty('--c', p.c);
+    b.title = p.n;
+    b.onclick = () => setPaper({ pageColor: p.c });
+    grid.appendChild(b);
+  }
+  const row = $('#paper-pattern');
+  row.innerHTML = '';
+  for (const [val, label] of [['plain', 'Plain'], ['dots', 'Dotted']]) {
+    const b = document.createElement('button');
+    b.className = 'thick-btn' + (note.pagePattern === val ? ' on' : '');
+    b.textContent = label;
+    b.onclick = () => setPaper({ pagePattern: val });
+    row.appendChild(b);
+  }
+}
+
+function closePaperPop() { paperPop.hidden = true; }
+
+$('#btn-paper').onclick = () => {
+  if (!note) return;
+  if (!paperPop.hidden) return closePaperPop();
+  closePenPop();
+  renderPaperPop();
+  paperPop.hidden = false;
+  // hang it under the button, clamped inside the work column
+  const work = document.querySelector('.work');
+  const wr = work.getBoundingClientRect(), br = $('#btn-paper').getBoundingClientRect();
+  const left = Math.min(Math.max(8, br.left - wr.left - 80), wr.width - 224);
+  paperPop.style.left = left + 'px';
+  paperPop.style.top = (br.bottom - wr.top + 6) + 'px';
+};
+
+document.addEventListener('pointerdown', (e) => {
+  if (!paperPop.hidden && !e.target.closest('#paper-pop') && !e.target.closest('#btn-paper'))
+    closePaperPop();
+});
+
 function showNote(n) {
   dropPaperEdit(); // any leftover session belongs to a previous note
   setInkMode(false);
   deselectImage();
+  closePaperPop();
   titleEl.value = n ? (n.title || '') : '';
   editor.value = n ? (n.body || '') : '';
   pageModeLabel();
+  applyPaper(n);
   renderMarkdown();
   renderImages();
   renderNotes();
@@ -1585,6 +1674,7 @@ function applyPen(pn) {
 }
 
 function openPenPop(anchorBtn, pn) {
+  closePaperPop();          // only one popup on the page at a time
   // Thickness row
   const thick = $('#thick-row');
   thick.innerHTML = '';
@@ -1741,10 +1831,13 @@ function fitCanvas() {
   // a transform doesn't resize the layout box, so give the scroller the
   // on-screen size of the scaled page
   paperFit.style.height = Math.round(h * paperZoom) + 'px';
-  canvas.style.height = h + 'px';
-  // backing store follows the *screen* size so ink stays crisp when zoomed out
-  canvas.width = Math.round(PAPER_W * paperZoom * dpr);
-  canvas.height = Math.round(h * paperZoom * dpr);
+  // both ink planes are the same page, so they get the same geometry
+  for (const cv of [canvas, hlCanvas]) {
+    cv.style.height = h + 'px';
+    // backing store follows the *screen* size so ink stays crisp when zoomed out
+    cv.width = Math.round(PAPER_W * paperZoom * dpr);
+    cv.height = Math.round(h * paperZoom * dpr);
+  }
   redraw();
 }
 new ResizeObserver(fitCanvas).observe(paperScroll);
@@ -1849,49 +1942,54 @@ function toLogical(e) {
   };
 }
 
-function drawStroke(s) {
+// a stroke goes to the plane its tool belongs on: pen over the words,
+// highlighter under them
+function ctxFor(s) { return s.tool === 'highlighter' ? hctx : ctx; }
+
+function drawStroke(s, c = ctxFor(s)) {
   const pts = s.points;
   if (!pts || pts.length === 0) return;
-  ctx.save();
+  c.save();
   if (s.tool === 'highlighter') {
-    ctx.globalAlpha = 0.32;
-    ctx.strokeStyle = s.color;
-    ctx.lineWidth = s.size * 3.6;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
+    // opaque: the marker's translucency is the canvas's CSS opacity, so two
+    // crossing strokes read as one even band instead of a darker cross
+    c.strokeStyle = s.color;
+    c.lineWidth = s.size * 3.6;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    c.beginPath();
+    c.moveTo(pts[0].x, pts[0].y);
     for (let i = 1; i < pts.length - 1; i++) {          // curve through midpoints
       const mx = (pts[i].x + pts[i + 1].x) / 2, my = (pts[i].y + pts[i + 1].y) / 2;
-      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+      c.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
     }
     const L = pts[pts.length - 1];
-    ctx.lineTo(L.x, L.y);
-    ctx.stroke();
+    c.lineTo(L.x, L.y);
+    c.stroke();
   } else {
-    drawPenOutline(s);
+    drawPenOutline(s, c);
   }
-  ctx.restore();
+  c.restore();
 }
 
 // Pen strokes render as a single filled outline whose width follows pressure,
 // with quadratic curves through edge midpoints — no visible segment joints.
-function drawPenOutline(s) {
+function drawPenOutline(s, c = ctx) {
   const pts = s.points;
   const radius = (p) => Math.max(0.35, s.size * (0.45 + p.p * 1.4)) / 2;
-  ctx.fillStyle = s.color;
+  c.fillStyle = s.color;
 
   if (pts.length < 3) {
     for (const p of pts) {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, radius(p), 0, Math.PI * 2);
-      ctx.fill();
+      c.beginPath();
+      c.arc(p.x, p.y, radius(p), 0, Math.PI * 2);
+      c.fill();
     }
     if (pts.length === 2) {
-      ctx.strokeStyle = s.color;
-      ctx.lineWidth = radius(pts[0]) + radius(pts[1]);
-      ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(pts[1].x, pts[1].y); ctx.stroke();
+      c.strokeStyle = s.color;
+      c.lineWidth = radius(pts[0]) + radius(pts[1]);
+      c.lineCap = 'round';
+      c.beginPath(); c.moveTo(pts[0].x, pts[0].y); c.lineTo(pts[1].x, pts[1].y); c.stroke();
     }
     return;
   }
@@ -1910,32 +2008,35 @@ function drawPenOutline(s) {
 
   const curveThrough = (arr, reverse) => {
     const a = reverse ? [...arr].reverse() : arr;
-    ctx.lineTo(a[0].x, a[0].y);
+    c.lineTo(a[0].x, a[0].y);
     for (let i = 1; i < a.length - 1; i++) {
       const mx = (a[i].x + a[i + 1].x) / 2, my = (a[i].y + a[i + 1].y) / 2;
-      ctx.quadraticCurveTo(a[i].x, a[i].y, mx, my);
+      c.quadraticCurveTo(a[i].x, a[i].y, mx, my);
     }
-    ctx.lineTo(a[a.length - 1].x, a[a.length - 1].y);
+    c.lineTo(a[a.length - 1].x, a[a.length - 1].y);
   };
 
-  ctx.beginPath();
-  ctx.moveTo(L[0].x, L[0].y);
+  c.beginPath();
+  c.moveTo(L[0].x, L[0].y);
   curveThrough(L, false);
   curveThrough(R, true);
-  ctx.closePath();
-  ctx.fill();
+  c.closePath();
+  c.fill();
 
   // round caps
   for (const i of [0, pts.length - 1]) {
-    ctx.beginPath();
-    ctx.arc(pts[i].x, pts[i].y, radius(pts[i]), 0, Math.PI * 2);
-    ctx.fill();
+    c.beginPath();
+    c.arc(pts[i].x, pts[i].y, radius(pts[i]), 0, Math.PI * 2);
+    c.fill();
   }
 }
 
 function redraw() {
-  ctx.setTransform(dpr * paperZoom, 0, 0, dpr * paperZoom, 0, 0);
-  ctx.clearRect(0, 0, PAPER_W, canvas.height / (dpr * paperZoom));
+  const k = dpr * paperZoom;
+  for (const [cv, c] of [[canvas, ctx], [hlCanvas, hctx]]) {
+    c.setTransform(k, 0, 0, k, 0, 0);
+    c.clearRect(0, 0, PAPER_W, cv.height / k);
+  }
   if (!note) return;
   for (const s of note.strokes) drawStroke(s);
   for (const s of liveRemote.values()) drawStroke(s);
@@ -2654,6 +2755,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !overlay.hidden) closeCodeDialog();
   if (e.key === 'Escape' && !nbdelOverlay.hidden) closeNotebookDelete();
   if (e.key === 'Escape' && !nnOverlay.hidden) nnOverlay.hidden = true;
+  if (e.key === 'Escape' && !paperPop.hidden) closePaperPop();
 });
 
 // ───────────────────────────── boot ──────────────────────────────────────
@@ -2698,6 +2800,7 @@ highlighting, size and alignment.
     const id = 'n-welcome-' + Date.now();
     const w = { id, notebookId: notebooks[0] && notebooks[0].id, title: 'Welcome to Inkwell',
                 body: WELCOME, strokes: [], images: [], codeTiles: {}, pageMode: 'a4',
+                pageColor: PAPER_DEFAULT, pagePattern: 'plain',
                 created: Date.now(), updated: Date.now() };
     await api('/notes/' + id, { method: 'PUT', body: JSON.stringify(w) });
     notesMeta = [{ ...w, preview: w.body.slice(0, 120), hasInk: false }];

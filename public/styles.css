@@ -116,9 +116,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .paper{position:relative; width:var(--paper-w);
   transform-origin:top left; transform:scale(var(--zoom,1));
   -webkit-text-size-adjust:100%; text-size-adjust:100%;
-  background:var(--paper); color:#22252B; border-radius:3px;
+  /* background-color, not the shorthand: --paper is re-pointed per note by
+     applyPaper() and the dot grid rides on top of it as a background-image */
+  background-color:var(--paper); color:#22252B; border-radius:3px;
   box-shadow:0 1px 0 var(--paper-edge) inset, 0 18px 45px rgba(0,0,0,.5);
   min-height:400px}
+/* dot-grid paper. The grid is drawn in PAGE units, so .paper's own scale
+   carries it: the dots stay put over the words at any zoom or screen size. */
+.paper.dots{background-image:radial-gradient(circle at center,
+    rgba(0,0,0,.17) 1.1px, transparent 1.2px); background-size:24px 24px}
 .rendered{padding:38px 46px 60px; font-size:15.5px; line-height:1.7; word-wrap:break-word}
 .rendered h1,.rendered h2,.rendered h3{line-height:1.25; margin:1.2em 0 .5em}
 .rendered h1{font-size:26px; border-bottom:1px solid #DDD4BE; padding-bottom:.3em}
@@ -210,6 +216,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 /* while the pen is out, pictures are just background to draw on */
 .paper.inking .pimg{outline-color:transparent}
 
+/* Two ink planes. Pen sits on top of everything; the highlighter sits under the
+   words (same z as the back pictures, but later in the DOM, so above them), so
+   the glyphs stay crisp instead of being washed over. The marker's translucency
+   lives here rather than in globalAlpha, which keeps crossing strokes from
+   compounding into a darker patch. */
+#hl-canvas{position:absolute; inset:0; width:100%; pointer-events:none;
+  z-index:1; opacity:.82}
 #ink-canvas{position:absolute; inset:0; width:100%; pointer-events:none; z-index:5}
 .paper.inking #ink-canvas{pointer-events:auto; cursor:crosshair; touch-action:none}
 /* on a phone a slow press would otherwise pop the selection/callout menu and
@@ -263,6 +276,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   background:var(--c); border:2px solid #14161B; box-shadow:0 0 0 1px var(--line)}
 .ink-swatch:hover{box-shadow:0 0 0 2px var(--dim)}
 .ink-swatch.on{box-shadow:0 0 0 2px var(--ink-bright)}
+/* page-colour picker: fewer, larger swatches than the ink grid, and the paper
+   choices are worded rather than drawn */
+.paper-pop{width:212px}
+.paper-pop .color-grid{grid-template-columns:repeat(5, 1fr); gap:9px}
+.paper-pop .thick-row{margin-bottom:2px}
+.paper-pop .thick-btn{font-family:'IBM Plex Sans',system-ui,sans-serif;
+  font-size:12px; color:var(--text); height:30px}
 .pressure{margin-left:auto; align-self:center; font-family:'IBM Plex Mono',monospace;
   font-size:11.5px; color:var(--dimmer); min-width:96px; text-align:right; white-space:nowrap}
 
@@ -424,7 +444,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .paper{margin:0 !important; box-shadow:none !important; border-radius:0 !important;
     transform:none !important;   /* print at true page size, not the screen fit */
     zoom:0.9679;             /* 820px paper → 210mm A4 width; page height lands on A4 */
-    background:var(--paper) !important}
+    /* background-color only — the shorthand would wipe the dot grid out of the PDF */
+    background-color:var(--paper) !important}
   .code-tile{box-shadow:none}
   *{-webkit-print-color-adjust:exact; print-color-adjust:exact}
 }

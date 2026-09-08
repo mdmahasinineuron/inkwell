@@ -46,6 +46,7 @@
       <div class="tool-actions">
         <button id="btn-view" title="Switch between writing and the page">¶ Write</button>
         <button id="btn-pagemode" title="Page style: A4 pages / infinite scroll">📄 A4</button>
+        <button id="btn-paper" title="Page colour and paper — change it any time">🎨 Paper</button>
         <button id="btn-code" title="Insert code block (Ctrl+Shift+K)">{ } Code block</button>
         <button id="btn-ink" title="Draw over the note">✎ Ink</button>
         <button id="btn-image" title="Insert an image — or just paste one with Ctrl+V">🖼 Image</button>
@@ -88,6 +89,15 @@
       <div class="color-grid" id="color-grid"></div>
     </div>
 
+    <!-- Page colour + paper popup: opens from 🎨 Paper, at any point while
+         writing — the page recolours under the words without touching them -->
+    <div class="pen-pop paper-pop" id="paper-pop" hidden>
+      <div class="pop-title">Page Colour</div>
+      <div class="color-grid" id="paper-grid"></div>
+      <div class="pop-title">Paper</div>
+      <div class="thick-row" id="paper-pattern"></div>
+    </div>
+
     <div class="panes" id="panes">
       <textarea id="editor" placeholder="Write Markdown here…" spellcheck="false"></textarea>
 
@@ -100,6 +110,9 @@
           <div class="paper" id="paper">
             <!-- pictures parked behind the text (see .img-layer in the CSS) -->
             <div class="img-layer back" id="img-layer-back"></div>
+            <!-- highlighter ink lives *under* the words, the way a real marker
+                 does: it colours the paper, it never touches the letters -->
+            <canvas id="hl-canvas"></canvas>
             <div class="rendered" id="rendered"></div>
             <!-- pasted/dropped pictures: positioned in page coordinates, so the
                  whole layer scales with the page and never drifts on zoom -->
